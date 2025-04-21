@@ -638,6 +638,7 @@ class ProgressPage(Gtk.Box):
              # Updated fractions slightly 
              (self._execute_storage_setup,      config_data.get('disk', {}), 0.00,  0.30), # 30%
              (self._install_packages,           config_data,             0.30,  0.75), # 45%
+             (self._debug_find_shim,            config_data,             0.75,  0.75), # Debug step
              (self._configure_system,           config_data,             0.75,  0.80), # 5%
              (self._create_user,                config_data,             0.80,  0.85), # 5%
              (self._enable_network_manager_step,config_data,             0.85,  0.87), # 2%
@@ -729,3 +730,24 @@ class ProgressPage(Gtk.Box):
             # Consider signaling the thread to cleanup instead.
             # For now, just call it here.
             self._attempt_unmount()
+
+    def _debug_find_shim(self, config_data):
+        """Debug step to locate shimx64.efi after DNF install."""
+        print("--- DEBUG: Searching for shimx64.efi in target root --- ")
+        find_cmd = ["find", self.target_root, "-name", "shimx64.efi"]
+        try:
+            # Run directly, doesn't need root if target_root is accessible
+            result = subprocess.run(find_cmd, capture_output=True, text=True, check=False, timeout=30)
+            print(f"  Command: {' '.join(shlex.quote(c) for c in find_cmd)}")
+            print(f"  Exit Code: {result.returncode}")
+            print(f"  Stdout:\n{result.stdout.strip()}")
+            if result.stderr:
+                print(f"  Stderr:\n{result.stderr.strip()}")
+            if not result.stdout.strip():
+                 print("  shimx64.efi NOT FOUND by find command.")
+            else:
+                 print("  shimx64.efi FOUND by find command.")
+        except Exception as e:
+            print(f"  ERROR running find command: {e}")
+        print("--- DEBUG: End search for shimx64.efi --- ")
+        return True # Always succeed, this is just for debugging
