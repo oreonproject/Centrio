@@ -245,9 +245,9 @@ def install_packages_dnf(target_root, progress_callback=None):
         # Example: Downloading Packages: [ 15%] |           | 112 kB/s | 761 kB | 00m06s ETA
         download_progress_re = re.compile(r"^Downloading Packages:.*?\[\s*(\d+)%\]")
         # Example: Installing        : kernel-core-6.9.5-200.fc40.x86_64        163/170 
-        install_progress_re = re.compile(r"^(Installing|Updating|Upgrading|Cleanup|Verifying)\s*:.*?\s+(\d+)/(\d+)\s*$\"")
-        # Simple count for total packages usually mentioned early
-        total_packages_re = re.compile(r"Total download size:.*Installed size:.* Package count: (\\d+)\") # May not always appear
+        install_progress_re = re.compile(r"^(Installing|Updating|Upgrading|Cleanup|Verifying)\s*:.*?\s+(\d+)/(\d+)\s*$")
+        # Corrected regex: removed extra backslash before d+
+        total_packages_re = re.compile(r"Total download size:.*Installed size:.* Package count: (\d+)") # May not always appear
 
         total_packages = 0
         packages_processed = 0
