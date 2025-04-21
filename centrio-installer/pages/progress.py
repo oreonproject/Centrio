@@ -131,13 +131,29 @@ class ProgressPage(Gtk.Box):
         partitions = disk_config.get("partitions", [])
         target_disks = disk_config.get("target_disks", [])
 
-        # --- Pre-emptive Unmount (Needed for Automatic) ---
         if method == "AUTOMATIC" and target_disks:
             primary_disk = target_disks[0]
-            self._update_progress_text(f"Checking existing mounts on {primary_disk} and its partitions...", 0.01)
-            print(f"Attempting pre-emptive unmount of partitions on {primary_disk}...")
+            self._update_progress_text(f"Preparing disk {primary_disk}...", 0.01)
             
-            # --- Find potential mount points using lsblk + findmnt per partition --- 
+            # --- Stop udisks2 --- 
+            stop_success, stop_err = backend._stop_service("udisks2.service")
+            if not stop_success:
+                 # Log warning but continue, maybe it wasn't running
+                 print(f"Warning: Failed to stop udisks2 service (continuing): {stop_err}")
+            else:
+                 print("Stopped udisks2 service temporarily.")
+                 time.sleep(1) # Give it a moment
+                 
+            # --- Deactivate LVM --- 
+            lvm_success, lvm_err = backend._deactivate_lvm_on_disk(primary_disk, self._update_progress_text)
+            if not lvm_success:
+                 # Log warning but proceed cautiously
+                 print(f"Warning: Failed to fully deactivate LVM on {primary_disk} (continuing): {lvm_err}")
+            else:
+                 print(f"LVM deactivation check complete for {primary_disk}.")
+                 
+            # --- Pre-emptive Unmount (using findmnt) --- 
+            self._update_progress_text(f"Checking existing mounts on {primary_disk}...", 0.02)
             mount_targets_to_check = set()
             device_paths_to_check = set([primary_disk]) # Start with the base disk
             try:
@@ -271,7 +287,7 @@ class ProgressPage(Gtk.Box):
             else:
                  print(f"  lsof checks passed for all paths: {list(final_device_paths_to_lsof)}.")
                 
-            self._update_progress_text("Pre-mount and process checks complete.", 0.04)
+            self._update_progress_text("Disk checks complete.", 0.04) # Renamed message
 
         # --- Execute Main Storage Actions ---
         if method == "AUTOMATIC":
@@ -544,68 +560,56 @@ class ProgressPage(Gtk.Box):
 
     def _run_installation_steps(self, config_data):
         """Worker function to run installation steps sequentially."""
-        # Adjusted order to include NetworkManager enable step
-        # Fractions need review for balance
-        steps = [
-            # Func                             # Data                   # Start% End%   Duration%
-            (self._execute_storage_setup,      config_data.get('disk', {}), 0.00,  0.35), # 35%
-            (self._install_packages,           config_data,             0.35,  0.80), # 45%
-            (self._configure_system,           config_data,             0.80,  0.85), # 5%
-            (self._create_user,                config_data,             0.85,  0.90), # 5%
-            (self._enable_network_manager_step,config_data,             0.90,  0.92), # 2% (Separate, quick step)
-            (self._install_bootloader,         config_data,             0.92,  0.97), # 5%
-            # Post-install?                                               0.97,  1.00  # 3%
+        steps = [ 
+             # Updated fractions slightly 
+             (self._execute_storage_setup,      config_data.get('disk', {}), 0.00,  0.30), # 30%
+             (self._install_packages,           config_data,             0.30,  0.75), # 45%
+             (self._configure_system,           config_data,             0.75,  0.80), # 5%
+             (self._create_user,                config_data,             0.80,  0.85), # 5%
+             (self._enable_network_manager_step,config_data,             0.85,  0.87), # 2%
+             (self._install_bootloader,         config_data,             0.87,  0.97), # 10%
+             # Post-install?                                               0.97,  1.00  # 3%
         ]
-
-        success = True
-        cumulative_progress = 0.0
-        for func, data, start_fraction, end_fraction in steps:
-            if self.stop_requested:
-                print("Installation stopped by user request.")
-                success = False
-                break
-            
-            # --- Define a scaled progress callback --- 
-            step_duration_fraction = end_fraction - start_fraction
-            def scaled_progress_callback(message, step_fraction):
-                # Clamp step_fraction between 0.0 and 1.0
-                step_fraction_clamped = max(0.0, min(step_fraction, 1.0))
-                # Calculate overall progress
-                overall_fraction = start_fraction + (step_fraction_clamped * step_duration_fraction)
-                # Update UI
-                self._update_progress_text(message, overall_fraction)
-            
-            # Run the actual step function (passing the original callback for text updates)
-            step_success = func(data) 
-            
-            if not step_success:
-                success = False
-                if not self.installation_error:
-                     self.installation_error = f"Step {func.__name__} failed without error message."
-                # Update progress bar to start_fraction on failure? Or keep last known?
-                self._update_progress_text(self.installation_error, start_fraction) # Show error and reset bar to step start
-                break
-            else:
-                 # Update progress bar to the end fraction for this step on success
-                 # We might need a final message from the step? Assume generic for now.
-                 final_step_message = f"Step {func.__name__} complete."
-                 self._update_progress_text(final_step_message, end_fraction)
         
-        # --- Finalize --- 
+        final_success = True
+        try:
+            # Main step loop
+            for func, data, start_fraction, end_fraction in steps:
+                if self.stop_requested:
+                    print("Installation stopped by user request.")
+                    final_success = False
+                    break
+                
+                step_success = func(data) 
+                
+                if not step_success:
+                    final_success = False
+                    if not self.installation_error:
+                         self.installation_error = f"Step {func.__name__} failed without error message."
+                    self._update_progress_text(self.installation_error, start_fraction)
+                    break
+                else:
+                     final_step_message = f"Step {func.__name__} complete."
+                     self._update_progress_text(final_step_message, end_fraction)
+        
+        finally:
+             # --- Ensure udisks2 is restarted --- 
+             print("Installation sequence finished or stopped. Ensuring udisks2 service is started...")
+             backend._start_service("udisks2.service")
+        
+        # --- Finalize UI --- 
         def finalize_ui():
-            if success and not self.stop_requested:
+            if final_success and not self.stop_requested:
                 final_message = "Installation finished successfully!"
                 self._update_progress_text(final_message, 1.0)
-                # Navigate to finished page after delay
                 GLib.timeout_add(1500, self.main_window.navigate_to_page, "finished")
             elif self.stop_requested:
                  self._update_progress_text("Installation stopped.", self.progress_bar.get_fraction())
-                 self._attempt_unmount() # Attempt cleanup
+                 self._attempt_unmount() 
             else:
-                # Failure case
                 error_msg = f"Installation failed: {self.installation_error}"
                 self._update_progress_text(error_msg, self.progress_bar.get_fraction())
-                self._attempt_unmount() # Attempt cleanup
+                self._attempt_unmount() 
         
         GLib.idle_add(finalize_ui)
 

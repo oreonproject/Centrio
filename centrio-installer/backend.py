@@ -524,3 +524,77 @@ def install_bootloader_in_container(target_root, primary_disk, progress_callback
     if not success: return False, err, None
 
     return True, "", None 
+
+# --- Service Management Helpers --- 
+def _manage_service(action, service_name):
+    """Helper to start or stop a systemd service."""
+    if action not in ["start", "stop"]:
+        return False, f"Invalid service action: {action}"
+    
+    cmd = ["systemctl", action, service_name]
+    # Use _run_command, assumes root check handled there
+    success, err, _ = _run_command(cmd, f"{action.capitalize()} service {service_name}")
+    if not success:
+         print(f"Warning: Failed to {action} service {service_name}: {err}")
+         # Don't make this fatal? Might prevent cleanup.
+         # return False, err 
+    return success, err
+
+def _stop_service(service_name):
+    print(f"Attempting to stop service: {service_name}...")
+    return _manage_service("stop", service_name)
+
+def _start_service(service_name):
+    print(f"Attempting to start service: {service_name}...")
+    return _manage_service("start", service_name)
+
+# --- LVM Deactivation Helper --- 
+def _deactivate_lvm_on_disk(disk_device, progress_callback=None):
+    """Attempts to find and deactivate LVM VGs associated with a disk."""
+    print(f"Checking for and deactivating LVM on {disk_device}...")
+    if progress_callback:
+        progress_callback(f"Checking LVM on {disk_device}...", None) # Text only update
+        
+    try:
+        # 1. Find PVs on the disk
+        pvs_cmd = ["pvs", "--noheadings", "-o", "vg_name", "--select", f"pv_name={disk_device}"]
+        pvs_success, pvs_err, pvs_stdout = _run_command(pvs_cmd, f"Find LVM PVs on {disk_device}")
+        
+        if not pvs_success:
+             # pvs fails if no PVs found, this is not necessarily an error here
+             if "No physical volume found" in pvs_err or "No PVs found" in pvs_stdout:
+                 print(f"  No LVM Physical Volumes found directly on {disk_device}.")
+                 return True, "" # Not an error
+             else:
+                 print(f"  Warning: Failed to check for PVs on {disk_device}: {pvs_err}")
+                 return False, pvs_err # Real error
+
+        vg_names = set(line.strip() for line in pvs_stdout.splitlines() if line.strip())
+        if not vg_names:
+             print(f"  No LVM Volume Groups associated with PV {disk_device}.")
+             return True, ""
+
+        # 2. Deactivate associated VGs
+        print(f"  Found LVM VGs associated with {disk_device}: {vg_names}. Attempting deactivation...")
+        all_deactivated = True
+        final_err = ""
+        for vg_name in vg_names:
+             vgchange_cmd = ["vgchange", "-an", vg_name]
+             vg_success, vg_err, _ = _run_command(vgchange_cmd, f"Deactivate VG {vg_name}")
+             if not vg_success:
+                 print(f"    Warning: Failed to deactivate VG {vg_name}: {vg_err}")
+                 all_deactivated = False
+                 final_err += f"Failed to deactivate VG {vg_name}: {vg_err}\n"
+             else:
+                  print(f"    Successfully deactivated VG {vg_name}.")
+                  
+        if progress_callback:
+             status = "Deactivation complete." if all_deactivated else "Deactivation attempted, some errors."
+             progress_callback(f"LVM Check on {disk_device}: {status}", None)
+             
+        return all_deactivated, final_err.strip()
+
+    except Exception as e:
+        err = f"Unexpected error during LVM deactivation check for {disk_device}: {e}"
+        print(f"ERROR: {err}")
+        return False, err 
