@@ -18,6 +18,7 @@ def _run_command(command_list, description, progress_callback=None, timeout=None
         progress_callback(f"Requesting privileges for: {description}...")
         
     stderr_output = ""
+    stdout_output = ""
     try:
         # Run the command with pkexec
         process = subprocess.Popen(
@@ -28,18 +29,17 @@ def _run_command(command_list, description, progress_callback=None, timeout=None
             text=True
         )
         
-        stdout, stderr = process.communicate(input=pipe_input, timeout=timeout)
-        stderr_output = stderr 
+        stdout_output, stderr_output = process.communicate(input=pipe_input, timeout=timeout)
         
-        print(f"  Command {description} stdout:\n{stdout.strip()}")
-        if stderr:
+        print(f"  Command {description} stdout:\n{stdout_output.strip()}")
+        if stderr_output:
              # Filter out common pkexec info messages if desired
-             filtered_stderr = "\n".join(line for line in stderr.splitlines() if "using backend" not in line)
+             filtered_stderr = "\n".join(line for line in stderr_output.splitlines() if "using backend" not in line)
              if filtered_stderr.strip():
                  print(f"  Command {description} stderr:\n{filtered_stderr.strip()}")
 
         if process.returncode != 0:
-            error_detail = stderr.strip() or f"Exited with code {process.returncode}"
+            error_detail = stderr_output.strip() or f"Exited with code {process.returncode}"
             # Check for common pkexec/PolicyKit errors
             if "Authentication failed" in error_detail or process.returncode == 127:
                  error_msg = f"Authorization failed for {description}. Check PolicyKit rules or password."
@@ -48,10 +48,10 @@ def _run_command(command_list, description, progress_callback=None, timeout=None
             else:
                 error_msg = f"{description} failed: {error_detail}"
             print(f"ERROR: {error_msg}")
-            return False, error_msg, None
+            return False, error_msg, stdout_output.strip()
             
         print(f"SUCCESS: {description} completed.")
-        return True, "", stdout.strip()
+        return True, "", stdout_output.strip()
 
     except FileNotFoundError:
         # This likely means pkexec itself wasn't found
@@ -66,13 +66,13 @@ def _run_command(command_list, description, progress_callback=None, timeout=None
             process.wait() # Wait for the process to terminate
         except Exception as kill_e:
             print(f"Warning: Error trying to kill timed out pkexec process: {kill_e}")
-        return False, err, None
+        return False, err, stdout_output.strip()
     except Exception as e:
         # Include stderr if available, otherwise just the exception
         err_detail = stderr_output.strip() or str(e)
         err = f"Unexpected error during {description} (via pkexec): {err_detail}"
         print(f"ERROR: {err}")
-        return False, err, None
+        return False, err, stdout_output.strip()
 
 def _run_in_container(target_root, command_list, description, progress_callback=None, timeout=None, pipe_input=None):
     """Runs a command inside the target root using systemd-nspawn (via pkexec)."""

@@ -133,51 +133,101 @@ class ProgressPage(Gtk.Box):
             primary_disk = target_disks[0] 
             self._update_progress_text(f"Checking existing mounts on {primary_disk}...", 0.01)
             print(f"Attempting pre-emptive unmount of partitions on {primary_disk}...")
+            
+            # --- Find potential mount points ---
+            mount_targets_to_check = set()
             try:
                 lsblk_cmd = ["lsblk", "-n", "-o", "PATH", "--raw", primary_disk]
-                result = subprocess.run(lsblk_cmd, capture_output=True, text=True, check=False, timeout=10) # Allow lsblk failure
+                result = subprocess.run(lsblk_cmd, capture_output=True, text=True, check=False, timeout=10)
                 if result.returncode == 0:
-                    existing_paths = [line.strip() for line in result.stdout.split('\n') if line.strip() and line.strip() != primary_disk]
-                    mounts_found = False
-                    for path in existing_paths:
-                        # Double-check with os.path.ismount
-                        try:
+                    potential_paths = [line.strip() for line in result.stdout.split('\n') if line.strip() and line.strip() != primary_disk]
+                    print(f"  lsblk identified potential paths: {potential_paths}")
+                    for path in potential_paths:
+                         try:
                              if os.path.ismount(path):
-                                 mounts_found = True
-                                 print(f"  Found mounted partition {path}, attempting umount...")
-                                 umount_cmd = ["umount", path]
-                                 try:
-                                     # Try normal unmount first, enforce check
-                                     subprocess.run(umount_cmd, check=True, timeout=5, capture_output=True, text=True)
-                                     print(f"    Successfully unmounted {path}")
-                                     time.sleep(1) # Brief pause after successful umount
-                                 except subprocess.CalledProcessError as e:
-                                     print(f"    Warning: Failed to unmount {path}: {e.stderr.strip()}. Trying lazy unmount...")
-                                     # Fallback to lazy unmount
-                                     umount_lazy_cmd = ["umount", "-l", path]
-                                     try:
-                                         subprocess.run(umount_lazy_cmd, check=True, timeout=5, capture_output=True, text=True)
-                                         print(f"      Lazy unmount successful for {path}")
-                                         time.sleep(1) # Brief pause after successful lazy umount
-                                     except Exception as lazy_e:
-                                         err_msg = f"Failed to unmount {path} even with lazy option: {lazy_e}"
-                                         print(f"      ERROR: {err_msg}")
-                                         self.installation_error = err_msg
-                                         return False # Fatal error if lazy unmount fails
-                        except Exception as mount_check_e:
-                             print(f"Warning: Error checking mount status for {path}: {mount_check_e}")
-                             
-                    if not mounts_found:
-                        print(f"  No active mounts found on {primary_disk}.")
+                                 print(f"    Confirmed mount point: {path}")
+                                 mount_targets_to_check.add(path)
+                             # else:
+                                 # print(f"    Path {path} is not a mount point.")
+                         except Exception as mount_check_e:
+                             print(f"    Warning: Error checking mount status for {path}: {mount_check_e}")
                 else:
-                    print(f"Warning: lsblk failed for {primary_disk} (rc={result.returncode}), cannot reliably check for mounts. Proceeding cautiously.")
-
+                     print(f"Warning: lsblk failed for {primary_disk} (rc={result.returncode}), cannot reliably check for mounts. Proceeding cautiously.")
             except Exception as e:
-                # Log error but proceed cautiously, might still work if no mounts exist
-                print(f"Warning: Error during pre-emptive check/unmount: {e}")
+                print(f"Warning: Error during lsblk check: {e}")
+
+            # --- Attempt Unmount --- 
+            unmount_failed = False
+            if mount_targets_to_check:
+                print(f"  Attempting to unmount: {sorted(list(mount_targets_to_check))}")
+                for path in sorted(list(mount_targets_to_check), reverse=True): # Unmount nested first
+                    print(f"    Unmounting {path}...")
+                    umount_cmd = ["umount", path]
+                    try:
+                        # Try normal unmount first, enforce check
+                        result = subprocess.run(umount_cmd, check=True, timeout=10, capture_output=True, text=True)
+                        print(f"      Successfully unmounted {path} (stdout: {result.stdout.strip()}, stderr: {result.stderr.strip()}) ")
+                        time.sleep(2) # Increased pause after successful umount
+                    except subprocess.CalledProcessError as e:
+                        print(f"      Warning: Failed standard unmount {path} (rc={e.returncode}, stdout: {e.stdout.strip()}, stderr: {e.stderr.strip()}). Trying lazy unmount...")
+                        # Fallback to lazy unmount
+                        umount_lazy_cmd = ["umount", "-l", path]
+                        try:
+                            result_lazy = subprocess.run(umount_lazy_cmd, check=True, timeout=10, capture_output=True, text=True)
+                            print(f"        Lazy unmount successful for {path} (stdout: {result_lazy.stdout.strip()}, stderr: {result_lazy.stderr.strip()}) ")
+                            time.sleep(2) # Increased pause after successful lazy umount
+                        except Exception as lazy_e:
+                            # Capture specific error for lazy unmount failure
+                            lazy_err_msg = f"Failed to unmount {path} even with lazy option: {lazy_e}"
+                            if isinstance(lazy_e, subprocess.CalledProcessError):
+                                lazy_err_msg += f" (rc={lazy_e.returncode}, stdout: {lazy_e.stdout.strip()}, stderr: {lazy_e.stderr.strip()})"
+                            print(f"      ERROR: {lazy_err_msg}")
+                            self.installation_error = lazy_err_msg
+                            unmount_failed = True
+                            break # Stop trying to unmount if one fails fatally
+                    except Exception as std_e:
+                        # Catch other errors during standard unmount
+                        std_err_msg = f"Error during standard unmount of {path}: {std_e}"
+                        print(f"      ERROR: {std_err_msg}")
+                        self.installation_error = std_err_msg
+                        unmount_failed = True
+                        break
+            else:
+                print("  No active mount points identified to unmount.")
                 
-            self._update_progress_text("Pre-mount check complete.", 0.02)
-            
+            if unmount_failed:
+                return False # Exit if unmount failed
+
+            # --- lsof Check (After Unmount Attempts) --- 
+            self._update_progress_text(f"Checking for processes using {primary_disk}...", 0.03)
+            print(f"Running lsof on {primary_disk} to check for busy resources...")
+            lsof_cmd = ["lsof", primary_disk]
+            # Use backend._run_command as lsof likely needs root if run directly on device file
+            lsof_success, lsof_err, lsof_stdout = backend._run_command(lsof_cmd, f"Check Processes on {primary_disk}", timeout=15)
+
+            # lsof usually exits 0 if it finds something, 1 if it doesn't.
+            # We consider *any* stdout as an indication of busy resources.
+            # We also need to handle cases where lsof command itself fails (e.g., not found).
+            if lsof_stdout: # Check if stdout has *any* content
+                err_msg = f"Device {primary_disk} is still busy. Processes found by lsof:\n{lsof_stdout}"
+                print(f"ERROR: {err_msg}")
+                self.installation_error = err_msg
+                return False # Device is busy
+            elif not lsof_success and "Cannot run program" not in lsof_err and "Command not found" not in lsof_err:
+                # lsof command failed for a reason other than not finding files (e.g., permissions?)
+                # Or if lsof wasn't found at all (pkexec error might indicate this too)
+                err_msg = f"Could not reliably check if {primary_disk} is busy using lsof. Error: {lsof_err}"
+                print(f"Warning: {err_msg}")
+                # Decide whether to proceed cautiously or fail? Let's fail for safety.
+                self.installation_error = err_msg + " (Proceeding might lead to errors)"
+                # return False # Option to fail hard
+                print("Proceeding cautiously despite lsof check issue...")
+            else:
+                # lsof ran successfully and produced no output, or failed because it found nothing (exit code 1 often), or lsof not found. Good to proceed.
+                 print(f"  lsof check passed: No processes found holding {primary_disk} open (or lsof not found/applicable). Proceeding with wipefs.")
+
+            self._update_progress_text("Pre-mount and process checks complete.", 0.04)
+
         # --- Execute Main Storage Actions ---
         if method == "AUTOMATIC":
             if not commands:
