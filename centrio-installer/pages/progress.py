@@ -62,10 +62,13 @@ class ProgressPage(Gtk.Box):
             # This code runs in the main GTK thread
             self.progress_label.set_text(text)
             if fraction is not None:
-                self.progress_bar.set_fraction(fraction)
-                self.progress_bar.set_text(f"{int(fraction * 100)}%")
-            print(f"Progress: {text} ({fraction})") # Log progress
-        # Schedule the UI update on the main thread
+                # Keep track of the latest known overall fraction
+                self.progress_value = max(self.progress_value, fraction) 
+                clamped_fraction = max(0.0, min(self.progress_value, 1.0))
+                self.progress_bar.set_fraction(clamped_fraction)
+                self.progress_bar.set_text(f"{int(clamped_fraction * 100)}%")
+            # Always log the text update
+            print(f"Progress Update: {text} (Overall Fraction: {fraction if fraction is not None else '[text only]' })") 
         GLib.idle_add(update)
 
     def _attempt_unmount(self):
@@ -131,30 +134,40 @@ class ProgressPage(Gtk.Box):
         # --- Pre-emptive Unmount (Needed for Automatic) ---
         if method == "AUTOMATIC" and target_disks:
             primary_disk = target_disks[0]
-            self._update_progress_text(f"Checking existing mounts on {primary_disk}...", 0.01)
+            self._update_progress_text(f"Checking existing mounts on {primary_disk} and its partitions...", 0.01)
             print(f"Attempting pre-emptive unmount of partitions on {primary_disk}...")
             
-            # --- Find potential mount points using findmnt --- 
+            # --- Find potential mount points using lsblk + findmnt per partition --- 
             mount_targets_to_check = set()
+            device_paths_to_check = set([primary_disk]) # Start with the base disk
             try:
-                # Use findmnt to find anything mounted from the primary disk or its partitions
-                findmnt_cmd = ["findmnt", "-n", "-r", "-o", "TARGET", f"--source={primary_disk}"]
-                print(f"  Running: {' '.join(findmnt_cmd)}")
-                result = subprocess.run(findmnt_cmd, capture_output=True, text=True, check=False, timeout=10)
-                
-                if result.returncode == 0 and result.stdout.strip():
-                    mount_points = [line.strip() for line in result.stdout.split('\n') if line.strip()]
-                    print(f"  findmnt identified mount points: {mount_points}")
-                    mount_targets_to_check.update(mount_points)
-                elif result.returncode != 0:
-                     print(f"  Warning: findmnt command failed (rc={result.returncode}): {result.stderr.strip()}")
+                # Get all related device paths (disk + partitions)
+                lsblk_cmd = ["lsblk", "-n", "-o", "PATH", "--raw", primary_disk]
+                print(f"  Running: {' '.join(lsblk_cmd)}")
+                lsblk_result = subprocess.run(lsblk_cmd, capture_output=True, text=True, check=False, timeout=10)
+                if lsblk_result.returncode == 0:
+                    found_paths = [line.strip() for line in lsblk_result.stdout.split('\n') if line.strip()]
+                    print(f"  lsblk identified potential device paths: {found_paths}")
+                    device_paths_to_check.update(found_paths)
                 else:
-                     print(f"  findmnt found no active mounts for sources starting with {primary_disk}.")
-                     
+                    print(f"  Warning: lsblk failed for {primary_disk} (rc={lsblk_result.returncode}), proceeding with just the base disk path.")
+                
+                # Check each device path for mounts using findmnt
+                print(f"  Checking for mounts on paths: {list(device_paths_to_check)}")
+                for dev_path in device_paths_to_check:
+                    findmnt_cmd = ["findmnt", "-n", "-r", "-o", "TARGET", f"--source={dev_path}"]
+                    # print(f"    Running: {' '.join(findmnt_cmd)}") # Verbose
+                    result = subprocess.run(findmnt_cmd, capture_output=True, text=True, check=False, timeout=10)
+                    if result.returncode == 0 and result.stdout.strip():
+                        mount_points = [line.strip() for line in result.stdout.split('\n') if line.strip()]
+                        print(f"    findmnt identified mount points for source {dev_path}: {mount_points}")
+                        mount_targets_to_check.update(mount_points)
+                    # Ignore errors or no output for individual checks
+
             except FileNotFoundError:
-                 print("  Warning: 'findmnt' command not found. Cannot reliably check for mounts.")
+                 print("  Warning: 'lsblk' or 'findmnt' command not found. Cannot reliably check for mounts.")
             except Exception as e:
-                print(f"  Warning: Error during findmnt check: {e}")
+                print(f"  Warning: Error during mount check: {e}")
 
             # --- Attempt Unmount --- 
             unmount_failed = False
@@ -196,7 +209,21 @@ class ProgressPage(Gtk.Box):
             if unmount_failed:
                 return False # Exit if unmount failed
 
-            # --- Run udevadm settle and sync --- 
+            # --- Run partprobe, udevadm settle and sync --- 
+            print(f"Running partprobe on {primary_disk}...")
+            try:
+                partprobe_cmd = ["partprobe", primary_disk]
+                # Use backend runner as partprobe often needs root
+                pp_success, pp_err, _ = backend._run_command(partprobe_cmd, f"Reread partitions on {primary_disk}", timeout=30)
+                if pp_success:
+                     print("  Partprobe successful.")
+                else:
+                     # Log error but don't necessarily fail, maybe device has no partitions yet
+                     print(f"  Warning: partprobe failed for {primary_disk}: {pp_err}")
+                time.sleep(2) # Pause after partprobe
+            except Exception as pp_e:
+                 print(f"Warning: Error running partprobe: {pp_e}")
+                 
             print("Running udevadm settle...")
             try:
                 # Run directly, might not need pkexec depending on context
@@ -215,27 +242,34 @@ class ProgressPage(Gtk.Box):
             except Exception as sync_e:
                  print(f"Warning: Error running sync: {sync_e}")
 
-            # --- lsof Check (After Unmount Attempts, settle, and sync) --- 
-            self._update_progress_text(f"Checking for processes using {primary_disk}...", 0.03)
-            print(f"Running lsof on {primary_disk} to check for busy resources...")
-            lsof_cmd = ["lsof", primary_disk]
-            lsof_success, lsof_err, lsof_stdout = backend._run_command(lsof_cmd, f"Check Processes on {primary_disk}", timeout=15)
+            # --- lsof Check (Targeted) --- 
+            self._update_progress_text(f"Checking for processes using {primary_disk} or its partitions...", 0.03)
+            lsof_found_processes = False
+            # Re-fetch device paths in case partprobe changed something? (Probably not needed)
+            final_device_paths_to_lsof = device_paths_to_check # Use paths found earlier
+            print(f"Running lsof on paths: {list(final_device_paths_to_lsof)} to check for busy resources...")
+            
+            for dev_path in final_device_paths_to_lsof:
+                print(f"  Checking lsof on {dev_path}...")
+                lsof_cmd = ["lsof", dev_path]
+                lsof_success, lsof_err, lsof_stdout = backend._run_command(lsof_cmd, f"Check Processes on {dev_path}", timeout=15)
+                
+                if lsof_stdout:
+                    err_msg_detail = f"Device path {dev_path} is busy. Processes found by lsof:\n{lsof_stdout}"
+                    print(f"ERROR: {err_msg_detail}")
+                    self.installation_error = err_msg_detail
+                    lsof_found_processes = True
+                    break # Found processes on one path, no need to check others
+                elif not lsof_success and ("Cannot run program" in lsof_err or "Command not found" in lsof_err):
+                     print(f"  Warning: lsof command not found or failed to execute for {dev_path}. Cannot verify device is free. Error: {lsof_err}")
+                     # Continue checking other paths, but maybe flag this?
+                # else: # lsof ran successfully with no output for this path
+                    # print(f"    lsof check passed for {dev_path}.")
 
-            # New Logic: Fail ONLY if stdout is not empty. Ignore stderr warnings/exit code 1.
-            if lsof_stdout:
-                err_msg = f"Device {primary_disk} is still busy. Processes found by lsof:\n{lsof_stdout}"
-                print(f"ERROR: {err_msg}")
-                self.installation_error = err_msg
-                return False # Device is busy
-            elif not lsof_success and ("Cannot run program" in lsof_err or "Command not found" in lsof_err):
-                # Handle case where lsof command itself is missing
-                 print(f"Warning: lsof command not found or failed to execute. Cannot verify device is free. Error: {lsof_err}")
-                 # Proceed cautiously as before, or fail hard? Let's keep cautious.
-                 print("Proceeding cautiously despite missing lsof check...")
+            if lsof_found_processes:
+                return False # A process was found holding one of the device paths
             else:
-                # lsof ran (even if exit code != 0 or stderr had warnings) and stdout was empty.
-                print(f"  lsof check passed: No processes found holding {primary_disk} open.")
-                # Any actual error from lsof_err was likely printed by _run_command already
+                 print(f"  lsof checks passed for all paths: {list(final_device_paths_to_lsof)}.")
                 
             self._update_progress_text("Pre-mount and process checks complete.", 0.04)
 
@@ -252,10 +286,10 @@ class ProgressPage(Gtk.Box):
                 cmd_name = cmd_list[0]
                 progress_fraction = 0.1 + (0.15 * (i / len(commands)))
                 
-                # Add specific delay before wipefs
+                # Increase delay before wipefs
                 if cmd_name == "wipefs" and primary_disk and primary_disk in cmd_list:
-                     print(f"Adding 3 second delay before executing {cmd_name} on {primary_disk}...")
-                     time.sleep(3)
+                     print(f"Adding 5 second delay before executing {cmd_name} on {primary_disk}...")
+                     time.sleep(5)
                      
                 # Use the backend runner (handles pkexec)
                 success, err, _ = backend._run_command(cmd_list, f"Storage Step: {cmd_name}", self._update_progress_text, timeout=60)
@@ -277,7 +311,6 @@ class ProgressPage(Gtk.Box):
             
         # --- Mount Filesystems (Common to Automatic & Manual) ---
         if not partitions:
-            # This check is somewhat redundant now but safe
             self.installation_error = f"No partition details found in config for {method} method, cannot mount."
             return False
             
@@ -290,36 +323,70 @@ class ProgressPage(Gtk.Box):
             
         mount_progress_start = 0.3
         mount_progress_end = 0.35
-        sorted_partitions = sorted(partitions, key=lambda p: 0 if p.get("mountpoint") == "/boot/efi" else (1 if p.get("mountpoint") == "/" else 2))
+        
+        # Corrected sort order: Mount / first, then others like /boot/efi
+        # Assign lower number to / mountpoint for sorting
+        sorted_partitions = sorted(partitions, key=lambda p: 0 if p.get("mountpoint") == "/" else (1 if p.get("mountpoint") == "/boot/efi" else 2))
+        
+        print(f"Mount order determined: {[p.get('mountpoint') for p in sorted_partitions]}")
         
         for i, part_info in enumerate(sorted_partitions):
             device = part_info.get("device")
             mountpoint = part_info.get("mountpoint")
-            if not device or not mountpoint: continue
+            fstype = part_info.get("fstype") # Get fstype for potential mount options
+            if not device or not mountpoint:
+                 print(f"Skipping partition due to missing device or mountpoint: {part_info}")
+                 continue
+                 
             full_mount_path = os.path.join(self.target_root, mountpoint.lstrip('/'))
             progress_fraction = mount_progress_start + (mount_progress_end - mount_progress_start) * (i / len(sorted_partitions))
+            
+            # Create mount point directory *before* attempting mount
             self._update_progress_text(f"Creating mount point {full_mount_path}...", progress_fraction)
             try:
-                 os.makedirs(full_mount_path, exist_ok=True)
+                 # Only create if it's not the root mountpoint itself (which already exists)
+                 if full_mount_path != self.target_root:
+                     os.makedirs(full_mount_path, exist_ok=True)
             except OSError as e:
-                 self.installation_error = f"Failed to create mount point {full_mount_path}: {e}"
+                 err_msg = f"Failed to create mount point {full_mount_path}: {e}"
+                 print(f"ERROR: {err_msg}")
+                 self.installation_error = err_msg
+                 self._attempt_unmount() # Cleanup previously mounted
                  return False
 
+            # Build mount command (add options if needed, e.g., for vfat)
             mount_cmd = ["mount", device, full_mount_path]
-            # Run mount directly on host (assuming root)
-            try:
-                 print(f"Running on host: Mount {device} -> {' '.join(shlex.quote(c) for c in mount_cmd)}")
-                 result = subprocess.run(mount_cmd, capture_output=True, text=True, check=True, timeout=15)
-                 success = True
-            except Exception as e:
-                 # Simplified error handling for brevity
-                 self.installation_error = f"Failed to mount {device}: {e}"
-                 success = False
+            if fstype == "vfat":
+                 # Add common options for FAT filesystems like EFI
+                 mount_cmd.insert(1, "-o")
+                 mount_cmd.insert(2, "rw,relatime,fmask=0077,dmask=0077,codepage=437,iocharset=iso8859-1,shortname=mixed,errors=remount-ro")
                  
-            if not success:
-                # Attempt to unmount already mounted things before failing fully?
-                self._attempt_unmount() 
-                return False
+            mount_desc = f"Mount {device} ({fstype}) -> {full_mount_path}"
+            self._update_progress_text(mount_desc + "...", progress_fraction + 0.01)
+            print(f"Running on host: {mount_desc} -> {' '.join(shlex.quote(c) for c in mount_cmd)}")
+            try:
+                 # Use subprocess.run directly as we are already root
+                 result = subprocess.run(mount_cmd, capture_output=True, text=True, check=True, timeout=30)
+                 print(f"  Mount successful. stdout: {result.stdout.strip()}, stderr: {result.stderr.strip()}")
+            except subprocess.CalledProcessError as e:
+                 err_msg = f"Failed to mount {device} to {full_mount_path} (rc={e.returncode}): {e.stderr.strip() or e.stdout.strip()}"
+                 print(f"ERROR: {err_msg}")
+                 self.installation_error = err_msg
+                 self._attempt_unmount() # Cleanup previously mounted
+                 return False
+            except FileNotFoundError:
+                 err_msg = "Mount command failed: 'mount' executable not found."
+                 print(f"ERROR: {err_msg}")
+                 self.installation_error = err_msg
+                 self._attempt_unmount()
+                 return False
+            except Exception as e:
+                 # Catch other potential errors like timeouts
+                 err_msg = f"Unexpected error mounting {device}: {e}"
+                 print(f"ERROR: {err_msg}")
+                 self.installation_error = err_msg
+                 self._attempt_unmount()
+                 return False
 
         self._update_progress_text("Filesystems mounted successfully.", mount_progress_end)
         return True
@@ -388,20 +455,39 @@ class ProgressPage(Gtk.Box):
              self.installation_error = f"Unsupported payload type: {payload_type}" # Only DNF supported now
              return False
              
-        self._update_progress_text(f"Installing packages via {payload_type}...", 0.6)
+        # Add message here before calling backend
+        self._update_progress_text(f"Starting package installation via {payload_type} (This may take a while)...", 0.35) 
         
-        # Pass the progress callback for potential future use inside backend
+        # Call backend function, passing the progress callback
         success, err = backend.install_packages_dnf(
             self.target_root,
             progress_callback=self._update_progress_text 
         )
         
+        # Note: Progress fractions inside install_packages_dnf range from 0.0 to 1.0,
+        # mapped to the overall progress range 0.35 -> 0.8 in _run_installation_steps scaling below.
+        # We just update the final message here.
         if success:
-            self._update_progress_text("Package installation complete.", 0.8)
+            self._update_progress_text("Package installation complete.", 0.8) # Final fraction for this step
         else:
-             self.installation_error = err
+             self.installation_error = err # Error already set by backend ideally
              
         return success
+
+    def _enable_network_manager_step(self, config_data):
+        """Step wrapper for enabling NetworkManager."""
+        if self.stop_requested: return False, "Stop requested"
+        # No initial message needed, backend function sends one
+        success, warning = backend.enable_network_manager(
+             self.target_root, 
+             progress_callback=self._update_progress_text
+        )
+        # Success is always True unless a fatal error occurred in _run_command
+        # A warning is not considered a failure for this step
+        if not success: # Should only happen if _run_command fails badly
+             self.installation_error = warning
+             return False 
+        return True 
 
     def _install_bootloader(self, config_data):
         """Installs bootloader using backend function."""
@@ -458,31 +544,52 @@ class ProgressPage(Gtk.Box):
 
     def _run_installation_steps(self, config_data):
         """Worker function to run installation steps sequentially."""
+        # Adjusted order to include NetworkManager enable step
+        # Fractions need review for balance
         steps = [
-            (self._execute_storage_setup, config_data.get('disk', {})), # 0.0 - 0.35
-            (self._configure_system, config_data),                   # 0.4 - 0.45
-            (self._create_user, config_data),                        # 0.5 - 0.55
-            (self._install_packages, config_data),                   # 0.6 - 0.8
-            (self._install_bootloader, config_data),                 # 0.9 - 0.95
-            # Add post-install step here if needed
+            # Func                             # Data                   # Start% End%   Duration%
+            (self._execute_storage_setup,      config_data.get('disk', {}), 0.00,  0.35), # 35%
+            (self._install_packages,           config_data,             0.35,  0.80), # 45%
+            (self._configure_system,           config_data,             0.80,  0.85), # 5%
+            (self._create_user,                config_data,             0.85,  0.90), # 5%
+            (self._enable_network_manager_step,config_data,             0.90,  0.92), # 2% (Separate, quick step)
+            (self._install_bootloader,         config_data,             0.92,  0.97), # 5%
+            # Post-install?                                               0.97,  1.00  # 3%
         ]
 
         success = True
-        for func, data in steps:
+        cumulative_progress = 0.0
+        for func, data, start_fraction, end_fraction in steps:
             if self.stop_requested:
                 print("Installation stopped by user request.")
                 success = False
-                # Don't set installation_error if stopped by user
                 break
             
-            # Call the step function (which now returns success boolean)
+            # --- Define a scaled progress callback --- 
+            step_duration_fraction = end_fraction - start_fraction
+            def scaled_progress_callback(message, step_fraction):
+                # Clamp step_fraction between 0.0 and 1.0
+                step_fraction_clamped = max(0.0, min(step_fraction, 1.0))
+                # Calculate overall progress
+                overall_fraction = start_fraction + (step_fraction_clamped * step_duration_fraction)
+                # Update UI
+                self._update_progress_text(message, overall_fraction)
+            
+            # Run the actual step function (passing the original callback for text updates)
             step_success = func(data) 
+            
             if not step_success:
                 success = False
-                # Error message should be set in self.installation_error by the failed function
                 if not self.installation_error:
                      self.installation_error = f"Step {func.__name__} failed without error message."
+                # Update progress bar to start_fraction on failure? Or keep last known?
+                self._update_progress_text(self.installation_error, start_fraction) # Show error and reset bar to step start
                 break
+            else:
+                 # Update progress bar to the end fraction for this step on success
+                 # We might need a final message from the step? Assume generic for now.
+                 final_step_message = f"Step {func.__name__} complete."
+                 self._update_progress_text(final_step_message, end_fraction)
         
         # --- Finalize --- 
         def finalize_ui():

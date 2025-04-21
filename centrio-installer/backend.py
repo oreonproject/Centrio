@@ -7,22 +7,34 @@ import re # For parsing os-release
 from .utils import get_os_release_info
 
 def _run_command(command_list, description, progress_callback=None, timeout=None, pipe_input=None):
-    """Runs a command via pkexec, captures output, handles errors, and calls progress callback."""
+    """Runs a command, using pkexec if not already root, captures output, handles errors.
     
-    # Prepend pkexec to the command list
-    pkexec_command_list = ["pkexec"] + command_list
+    Checks os.geteuid() to determine if running as root.
+    """
     
-    cmd_str = ' '.join(shlex.quote(c) for c in pkexec_command_list)
-    print(f"Executing Backend Step (via pkexec): {description} -> {cmd_str}")
-    if progress_callback:
-        progress_callback(f"Requesting privileges for: {description}...")
+    is_root = os.geteuid() == 0
+    final_command_list = []
+    execution_method = ""
+
+    if is_root:
+        final_command_list = command_list
+        execution_method = "directly as root"
+        print(f"Executing Backend Step ({execution_method}): {description} -> {' '.join(shlex.quote(c) for c in final_command_list)}")
+    else:
+        # Prepend pkexec if not running as root
+        final_command_list = ["pkexec"] + command_list
+        execution_method = "via pkexec"
+        cmd_str = ' '.join(shlex.quote(c) for c in final_command_list)
+        print(f"Executing Backend Step ({execution_method}): {description} -> {cmd_str}")
+        if progress_callback:
+            progress_callback(f"Requesting privileges for: {description}...")
         
     stderr_output = ""
     stdout_output = ""
     try:
-        # Run the command with pkexec
+        # Run the command (either directly or with pkexec)
         process = subprocess.Popen(
-            pkexec_command_list, 
+            final_command_list, # Use the decided command list
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.PIPE if pipe_input is not None else None,
@@ -33,54 +45,55 @@ def _run_command(command_list, description, progress_callback=None, timeout=None
         
         print(f"  Command {description} stdout:\n{stdout_output.strip()}")
         if stderr_output:
-             # Filter out common pkexec info messages if desired
-             filtered_stderr = "\n".join(line for line in stderr_output.splitlines() if "using backend" not in line)
+             # Filter pkexec messages only if running via pkexec
+             filtered_stderr = stderr_output
+             if execution_method == "via pkexec":
+                  filtered_stderr = "\n".join(line for line in stderr_output.splitlines() if "using backend" not in line)
+             
              if filtered_stderr.strip():
                  print(f"  Command {description} stderr:\n{filtered_stderr.strip()}")
 
         if process.returncode != 0:
             error_detail = stderr_output.strip() or f"Exited with code {process.returncode}"
-            # Check for common pkexec/PolicyKit errors
-            if "Authentication failed" in error_detail or process.returncode == 127:
-                 error_msg = f"Authorization failed for {description}. Check PolicyKit rules or password."
-            elif "Cannot run program" in error_detail or process.returncode == 126:
-                 error_msg = f"Command not found or not permitted by PolicyKit for {description}: {command_list[0]}"
-            else:
-                error_msg = f"{description} failed: {error_detail}"
-            print(f"ERROR: {error_msg}")
-            return False, error_msg, stdout_output.strip()
+            # Check for pkexec/PolicyKit errors only if running via pkexec
+            error_msg = f"{description} failed ({execution_method}): {error_detail}"
+            if execution_method == "via pkexec":
+                if "Authentication failed" in error_detail or process.returncode == 127:
+                     error_msg = f"Authorization failed for {description}. Check PolicyKit rules or password."
+                elif "Cannot run program" in error_detail or process.returncode == 126:
+                     error_msg = f"Command not found or not permitted by PolicyKit for {description}: {command_list[0]}"
+                # else: use the generic error_msg already set
             
-        print(f"SUCCESS: {description} completed.")
+            print(f"ERROR: {error_msg}")
+            return False, error_msg, stdout_output.strip() 
+            
+        print(f"SUCCESS: {description} completed ({execution_method}).")
         return True, "", stdout_output.strip()
 
     except FileNotFoundError:
-        # This likely means pkexec itself wasn't found
-        err = "Command not found: pkexec. Cannot run privileged commands."
+        # Handle command-not-found specifically
+        cmd_not_found = final_command_list[0]
+        err = f"Command not found: {cmd_not_found}. Ensure it's installed and in the PATH."
+        if execution_method == "via pkexec" and cmd_not_found == "pkexec":
+            err = "Command not found: pkexec. Cannot run privileged commands."
         print(f"ERROR: {err}")
-        return False, err, None
+        return False, err, None 
     except subprocess.TimeoutExpired:
-        err = f"Timeout expired after {timeout}s for {description} (via pkexec)."
-        # Try to kill the process if it timed out during communicate
+        err = f"Timeout expired after {timeout}s for {description} ({execution_method})."
         try:
             process.kill()
-            process.wait() # Wait for the process to terminate
+            process.wait()
         except Exception as kill_e:
-            print(f"Warning: Error trying to kill timed out pkexec process: {kill_e}")
-        return False, err, stdout_output.strip()
+            print(f"Warning: Error trying to kill timed out process: {kill_e}")
+        return False, err, stdout_output.strip() 
     except Exception as e:
-        # Include stderr if available, otherwise just the exception
         err_detail = stderr_output.strip() or str(e)
-        err = f"Unexpected error during {description} (via pkexec): {err_detail}"
+        err = f"Unexpected error during {description} ({execution_method}): {err_detail}"
         print(f"ERROR: {err}")
         return False, err, stdout_output.strip()
 
 def _run_in_container(target_root, command_list, description, progress_callback=None, timeout=None, pipe_input=None):
-    """Runs a command inside the target root using systemd-nspawn (via pkexec)."""
-    # Requires systemd-nspawn to be installed and user running installer to have permissions
-    # -q: quiet
-    # -D: directory to use as root
-    # --capability=all: Grant all capabilities (might need refinement for security)
-    # --bind-ro=/etc/resolv.conf: Needed for network access within container
+    """Runs a command inside the target root using systemd-nspawn (via _run_command)."""
     nspawn_cmd = [
         "systemd-nspawn", 
         "-q", 
@@ -88,7 +101,7 @@ def _run_in_container(target_root, command_list, description, progress_callback=
         "--capability=all", 
         "--bind-ro=/etc/resolv.conf" 
     ] + command_list
-    # _run_command will prepend pkexec to nspawn_cmd
+    # _run_command will handle pkexec prepending if needed
     return _run_command(nspawn_cmd, description, progress_callback, timeout, pipe_input)
 
 # --- Configuration Functions ---
@@ -171,47 +184,207 @@ def create_user_in_container(target_root, user_config, progress_callback=None):
 # --- Package Installation ---
 
 def install_packages_dnf(target_root, progress_callback=None):
-    """Installs base packages using DNF --installroot."""
+    """Installs base packages using DNF --installroot, parsing output for progress.
     
-    os_info = get_os_release_info() 
+    Note: This function bypasses _run_command and assumes it is run with root privileges.
+    It directly calls subprocess.Popen for DNF.
+    """
+    
+    # --- Root Check --- 
+    if os.geteuid() != 0:
+        err = "install_packages_dnf must be run as root."
+        print(f"ERROR: {err}")
+        return False, err
+
+    # --- Get Release Version --- 
+    os_info = get_os_release_info()
     releasever = os_info.get("VERSION_ID")
     if not releasever:
-        print("Warning: Could not detect OS VERSION_ID. Falling back to 40.")
-        releasever = "40" 
+        print("Warning: Could not detect OS VERSION_ID. Falling back to default.")
+        # Attempt to get from target_root if possible? Requires parsing /etc/os-release
+        # For now, stick to fallback or error
+        # return False, "Could not determine release version for DNF." # Option: fail hard
+        releasever = "40" # Default fallback
     print(f"Using release version: {releasever}")
-        
-    # Refined package set for a basic graphical system (example)
+    
+    # --- Define Packages and Command --- 
     packages = [
         "@core", "kernel", "grub2-efi-x64", "grub2-pc", "efibootmgr", 
         "linux-firmware", "NetworkManager", "systemd-resolved", 
-        # Add a minimal desktop environment if desired (e.g., XFCE)
-        # "@xfce-desktop-environment", "lightdm"
-        # Or just essentials
         "bash-completion", "dnf-utils"
+        # Add more packages as needed
     ]
     
     dnf_cmd = [
         "dnf", 
         "install", 
         "-y", 
-        "--nogpgcheck", # Allow installation without GPG key checking (Use with caution!)
+        "--nogpgcheck", 
         f"--installroot={target_root}",
         f"--releasever={releasever}",
         f"--setopt=install_weak_deps=False"
     ] + packages
 
-    success, err, _ = _run_command(dnf_cmd, "Install Base Packages (DNF)", progress_callback, timeout=3600) # Increase timeout to 1 hour
-    if not success: return False, err, None
-    
-    # Optionally, enable NetworkManager service in the installed system
-    nm_enable_cmd = ["systemctl", "enable", "NetworkManager.service"]
-    success, err, _ = _run_in_container(target_root, nm_enable_cmd, "Enable NetworkManager Service", progress_callback, timeout=30)
-    if not success: 
-        print(f"Warning: Failed to enable NetworkManager service: {err}")
-        # Continue installation even if service enabling fails?
-        pass 
+    print(f"Executing Backend Step (directly as root): Install Base Packages (DNF) -> {' '.join(shlex.quote(c) for c in dnf_cmd)}")
+    if progress_callback:
+        progress_callback("Starting DNF package installation (This may take a while...)", 0.0) # Initial message
+        
+    # --- Execute DNF and Stream Output --- 
+    process = None
+    stderr_output = ""
+    try:
+        process = subprocess.Popen(
+            dnf_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1 # Line-buffered
+        )
 
-    return True, "", None
+        # Regex patterns for progress parsing
+        # Example: Downloading Packages: [ 15%] |           | 112 kB/s | 761 kB | 00m06s ETA
+        download_progress_re = re.compile(r"^Downloading Packages:.*?\[\s*(\d+)%\]")
+        # Example: Installing        : kernel-core-6.9.5-200.fc40.x86_64        163/170 
+        install_progress_re = re.compile(r"^(Installing|Updating|Upgrading|Cleanup|Verifying)\s*:.*?\s+(\d+)/(\d+)\s*$\"")
+        # Simple count for total packages usually mentioned early
+        total_packages_re = re.compile(r"Total download size:.*Installed size:.* Package count: (\\d+)\") # May not always appear
+
+        total_packages = 0
+        packages_processed = 0
+        current_phase = "Initializing"
+        last_fraction = 0.0
+        
+        # Read stdout line by line
+        for line in iter(process.stdout.readline, ''):
+            line_strip = line.strip()
+            if not line_strip: continue
+            # print(f"DNF_RAW: {line_strip}") # Debug: print raw DNF output
+            
+            # --- Phase Detection (simple) --- 
+            if "Downloading Packages" in line_strip: current_phase = "Downloading"
+            elif "Running transaction check" in line_strip: current_phase = "Checking Transaction"
+            elif "Running transaction test" in line_strip: current_phase = "Testing Transaction"
+            elif "Running transaction" in line_strip: current_phase = "Running Transaction"
+            elif line_strip.startswith("Installing") or line_strip.startswith("Updating"): current_phase = "Installing"
+            elif line_strip.startswith("Running scriptlet"): current_phase = "Running Scriptlets"
+            elif line_strip.startswith("Verifying"): current_phase = "Verifying"
+            elif line_strip.startswith("Installed:"): current_phase = "Finalizing Installation"
+            elif line_strip.startswith("Complete!"): current_phase = "Complete"
+
+            # --- Progress Parsing --- 
+            fraction = last_fraction # Default to last known fraction
+            message = f"DNF: {current_phase}..."
+            
+            # Total Package Count (Best effort)
+            match_total = total_packages_re.search(line_strip)
+            if match_total:
+                 total_packages = int(match_total.group(1))
+                 print(f"Detected total package count: {total_packages}")
+
+            # Download Progress
+            match_dl = download_progress_re.search(line_strip)
+            if match_dl:
+                 download_percent = int(match_dl.group(1))
+                 # Estimate overall progress: Assume download is first 30%?
+                 fraction = 0.0 + (download_percent / 100.0) * 0.30
+                 message = f"DNF: Downloading ({download_percent}%)..."
+                 
+            # Installation/Verification Progress
+            match_install = install_progress_re.search(line_strip)
+            if match_install:
+                current_phase = match_install.group(1) # More specific phase
+                packages_processed = int(match_install.group(2))
+                total_packages_from_line = int(match_install.group(3))
+                # Use total from line if greater than previously detected (more reliable)
+                if total_packages_from_line > total_packages:
+                    total_packages = total_packages_from_line
+                
+                if total_packages > 0:
+                    # Estimate overall progress: Assume install/verify is 30% to 95%?
+                    phase_progress = packages_processed / total_packages
+                    if current_phase == "Installing" or current_phase == "Updating" or current_phase == "Upgrading":
+                       fraction = 0.30 + phase_progress * 0.60 # Installation: 30% -> 90%
+                    elif current_phase == "Verifying":
+                       fraction = 0.90 + phase_progress * 0.05 # Verification: 90% -> 95%
+                    elif current_phase == "Cleanup":
+                       fraction = 0.95 + phase_progress * 0.05 # Cleanup: 95% -> 100%
+                    message = f"DNF: {current_phase} ({packages_processed}/{total_packages})..."
+                else:
+                     message = f"DNF: {current_phase} (package {packages_processed})..."
+                     fraction = 0.30 # Fallback if total not found yet
+
+            # Clamp fraction between 0.0 and 0.99 during processing
+            fraction = max(0.0, min(fraction, 0.99))
+            last_fraction = fraction
+            
+            if progress_callback:
+                progress_callback(message, fraction)
+
+            # Check if process exited prematurely
+            if process.poll() is not None:
+                print("Warning: DNF process exited while reading stdout.")
+                break
+        
+        # --- Wait and Check Result --- 
+        process.stdout.close() # Close stdout pipe
+        return_code = process.wait(timeout=60) # Wait briefly for final exit
+        stderr_output = process.stderr.read() # Read all stderr at the end
+        process.stderr.close()
+        
+        if return_code != 0:
+            error_msg = f"DNF installation failed (rc={return_code}). Stderr:\n{stderr_output.strip()}"
+            print(f"ERROR: {error_msg}")
+            if progress_callback: progress_callback(error_msg, last_fraction)
+            return False, error_msg
+        else:
+             print(f"SUCCESS: DNF installation completed.")
+             if progress_callback: progress_callback("DNF installation complete.", 1.0)
+             # Optionally enable NetworkManager here (but requires _run_in_container, which uses _run_command)
+             # Consider moving NM enable to a separate step after this function returns success.
+             return True, ""
+            
+    except FileNotFoundError:
+        err = "Command not found: dnf. Cannot install packages."
+        print(f"ERROR: {err}")
+        if progress_callback: progress_callback(err, 0.0)
+        return False, err
+    except subprocess.TimeoutExpired:
+        err = "Timeout expired during DNF execution."
+        print(f"ERROR: {err}")
+        if process: process.kill()
+        if progress_callback: progress_callback(err, last_fraction)
+        return False, err
+    except Exception as e:
+        err = f"Unexpected error during DNF execution: {e}\nStderr so far: {stderr_output}"
+        print(f"ERROR: {err}")
+        if process: process.kill()
+        if progress_callback: progress_callback(err, last_fraction)
+        return False, err
+    finally:
+         # Ensure streams are closed if process was started
+         if process:
+             if process.stdout and not process.stdout.closed: process.stdout.close()
+             if process.stderr and not process.stderr.closed: process.stderr.close()
+
+# --- Move NetworkManager Enable --- 
+# We need a function that uses _run_in_container (and thus _run_command for root check)
+def enable_network_manager(target_root, progress_callback=None):
+    """Enables NetworkManager service in the target system."""
+    if progress_callback:
+        progress_callback("Enabling NetworkManager service...", 0.96) # Example fraction
+    
+    nm_enable_cmd = ["systemctl", "enable", "NetworkManager.service"]
+    success, err, _ = _run_in_container(target_root, nm_enable_cmd, "Enable NetworkManager Service", progress_callback=None, timeout=30)
+    if not success: 
+        warning_msg = f"Warning: Failed to enable NetworkManager service: {err}"
+        print(warning_msg)
+        if progress_callback: progress_callback(warning_msg, 0.97) # Update UI with warning
+        # Continue installation even if service enabling fails? Let's return True but log warning.
+        return True, warning_msg # Indicate success overall, but pass warning
+    else:
+        print("Successfully enabled NetworkManager service.")
+        if progress_callback: progress_callback("NetworkManager service enabled.", 0.97)
+        return True, ""
 
 # --- Bootloader Installation ---
 

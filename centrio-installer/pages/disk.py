@@ -125,7 +125,7 @@ class DiskPage(BaseConfigurationPage):
         # Radio buttons for partitioning method
         self.auto_part_check = Gtk.CheckButton(label="Automatic Partitioning")
         self.auto_part_check.set_tooltip_text("Use selected disk(s) with a default layout")
-        self.manual_part_check = Gtk.CheckButton(label="Manual Partitioning (Not Implemented)", group=self.auto_part_check)
+        self.manual_part_check = Gtk.CheckButton(label="Manual Partitioning", group=self.auto_part_check)
         self.manual_part_check.set_sensitive(False) # Disable manual for now
         
         self.auto_part_check.connect("toggled", self.on_partitioning_method_toggled)
@@ -275,7 +275,7 @@ class DiskPage(BaseConfigurationPage):
              print("Partitioning method: AUTOMATIC")
              self.partitioning_method = "AUTOMATIC"
          elif self.manual_part_check.get_active():
-             print("Partitioning method: MANUAL (Not Implemented)")
+             print("Partitioning method: MANUAL")
              self.partitioning_method = "MANUAL"
          else:
              # Should not happen with radio buttons unless both are inactive initially
@@ -385,7 +385,7 @@ class DiskPage(BaseConfigurationPage):
         # 3. Mount the created filesystems under a target directory (e.g., /mnt/sysimage).
         
         if self.partitioning_method == "AUTOMATIC":
-            self.show_toast(f"Automatic partitioning on {', '.join(sorted(list(self.selected_disks)))} requested (Not Implemented)." )
+            self.show_toast(f"Automatic partitioning on {', '.join(sorted(list(self.selected_disks)))} requested." )
             # Simulate success for now
             config_values = {
                 "selected_disks": sorted(list(self.selected_disks)),
