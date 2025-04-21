@@ -94,12 +94,15 @@ def _run_command(command_list, description, progress_callback=None, timeout=None
 
 def _run_in_container(target_root, command_list, description, progress_callback=None, timeout=None, pipe_input=None):
     """Runs a command inside the target root using systemd-nspawn (via _run_command)."""
+    # Add --register=no and --as-pid2 to minimize container setup and potential conflicts
     nspawn_cmd = [
         "systemd-nspawn", 
         "-q", 
         f"-D{target_root}",
         "--capability=all", 
-        "--bind-ro=/etc/resolv.conf" 
+        "--bind-ro=/etc/resolv.conf",
+        "--register=no",
+        "--as-pid2" # Add this flag
     ] + command_list
     # _run_command will handle pkexec prepending if needed
     return _run_command(nspawn_cmd, description, progress_callback, timeout, pipe_input)
