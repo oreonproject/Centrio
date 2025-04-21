@@ -5,6 +5,7 @@ import shlex
 import os
 import re # For parsing os-release
 from .utils import get_os_release_info
+import errno # For checking mount errors
 
 def _run_command(command_list, description, progress_callback=None, timeout=None, pipe_input=None):
     """Runs a command, using pkexec if not already root, captures output, handles errors.
@@ -92,30 +93,93 @@ def _run_command(command_list, description, progress_callback=None, timeout=None
         print(f"ERROR: {err}")
         return False, err, stdout_output.strip()
 
-def _run_in_container(target_root, command_list, description, progress_callback=None, timeout=None, pipe_input=None):
-    """Runs a command inside the target root using systemd-nspawn (via _run_command)."""
-    # Add --register=no and --as-pid2 to minimize container setup and potential conflicts
-    nspawn_cmd = [
-        "systemd-nspawn", 
-        "-q", 
-        f"-D{target_root}",
-        "--capability=all", 
-        "--bind-ro=/etc/resolv.conf",
-        "--register=no",
-        "--as-pid2" # Add this flag
-    ] + command_list
-    # _run_command will handle pkexec prepending if needed
-    return _run_command(nspawn_cmd, description, progress_callback, timeout, pipe_input)
+# --- New _run_in_chroot function ---
+def _run_in_chroot(target_root, command_list, description, progress_callback=None, timeout=None, pipe_input=None):
+    """Runs a command inside the target root using chroot, managing bind mounts.
+    
+    Requires manual mounting/unmounting of /proc, /sys, /dev, /dev/pts, and /etc/resolv.conf.
+    Assumes the caller (_run_command) handles root privileges.
+    """
+    mount_points = {
+        "proc": os.path.join(target_root, "proc"),
+        "sys": os.path.join(target_root, "sys"),
+        "dev": os.path.join(target_root, "dev"),
+        "dev/pts": os.path.join(target_root, "dev/pts"),
+        "resolv.conf": os.path.join(target_root, "etc/resolv.conf")
+    }
+    mounted_paths = set()
+    
+    try:
+        # --- Mount API filesystems and resolv.conf --- 
+        print(f"Setting up chroot environment in {target_root}...")
+        if not os.path.exists(mount_points["resolv.conf"]):
+            # Ensure target /etc/resolv.conf exists or can be created
+            try:
+                 os.makedirs(os.path.dirname(mount_points["resolv.conf"]), exist_ok=True)
+                 # Create an empty file if it doesn't exist, needed for bind mount target
+                 with open(mount_points["resolv.conf"], 'a'): os.utime(mount_points["resolv.conf"], None)
+            except OSError as e:
+                 raise RuntimeError(f"Failed to prepare target resolv.conf {mount_points['resolv.conf']}: {e}") from e
+                 
+        mount_commands = [
+            # Type      Source                 Target                                   Options
+            ("proc",    "proc",                mount_points["proc"],                 ["-t", "proc", "nodev,noexec,nosuid"]), 
+            ("sysfs",   "sys",                 mount_points["sys"],                  ["-t", "sysfs", "nodev,noexec,nosuid"]), 
+            ("devtmpfs","udev",               mount_points["dev"],                  ["-t", "devtmpfs", "mode=0755,nosuid"]), 
+            ("devpts",  "devpts",              mount_points["dev/pts"],              ["-t", "devpts", "mode=0620,gid=5,nosuid,noexec"]), 
+            ("bind",    "/etc/resolv.conf",    mount_points["resolv.conf"],         ["--bind"])
+        ]
+
+        for name, source, target, options in mount_commands:
+            try:
+                os.makedirs(target, exist_ok=True) # Ensure mount target dir exists
+                mount_cmd = ["mount"] + options + [source, target]
+                # Run mount directly (we assume _run_command ensured root if needed)
+                print(f"  Mounting {source} -> {target} ({name})")
+                result = subprocess.run(mount_cmd, check=True, capture_output=True, text=True, timeout=15)
+                mounted_paths.add(target)
+            except FileNotFoundError:
+                 raise RuntimeError("Mount command failed: 'mount' executable not found.")
+            except subprocess.CalledProcessError as e:
+                # Check if already mounted (exit code 32 often means this)
+                if e.returncode == 32 and ("already mounted" in e.stderr or "mount point does not exist" in e.stderr):
+                    print(f"    Warning: Mount for {target} possibly already exists or target missing? {e.stderr.strip()}")
+                    # Add to mounted_paths so we attempt unmount later anyway
+                    mounted_paths.add(target) 
+                else:
+                    raise RuntimeError(f"Failed to mount {source} to {target}: {e.stderr.strip()}") from e
+            except Exception as e:
+                 raise RuntimeError(f"Unexpected error mounting {source}: {e}") from e
+
+        # --- Execute command in chroot --- 
+        chroot_cmd = ["chroot", target_root] + command_list
+        # Use _run_command to handle execution (it checks root/pkexec itself)
+        success, err, stdout = _run_command(chroot_cmd, description, progress_callback, timeout, pipe_input)
+        return success, err, stdout
+        
+    finally:
+        # --- Unmount everything in reverse order --- 
+        print(f"Cleaning up chroot environment in {target_root}...")
+        for target in sorted(list(mounted_paths), reverse=True):
+            print(f"  Unmounting {target}...")
+            umount_cmd = ["umount", target]
+            try:
+                 # Try normal unmount first
+                 subprocess.run(umount_cmd, check=False, capture_output=True, text=True, timeout=15) # Don't check=True here, might fail if busy
+                 # Try lazy unmount if normal failed? Might hide issues.
+                 # Let's not use lazy unmount here for now.
+            except Exception as e:
+                 print(f"    Warning: Error during unmount of {target}: {e}")
 
 # --- Configuration Functions ---
 
 def configure_system_in_container(target_root, config_data, progress_callback=None):
-    """Configures timezone, locale, keyboard, hostname in target via systemd-nspawn."""
+    """Configures timezone, locale, keyboard, hostname in target via chroot."""
     
     # Timezone
     tz = config_data.get('timedate', {}).get('timezone')
     if tz:
-        success, err, _ = _run_in_container(target_root, ["timedatectl", "set-timezone", tz], "Set Timezone", progress_callback, timeout=15)
+        success, err, _ = _run_in_chroot(target_root, ["timedatectl", "set-timezone", tz], "Set Timezone", progress_callback, timeout=15)
         if not success: return False, err
     else:
         print("Skipping timezone configuration (not provided).")
@@ -123,7 +187,7 @@ def configure_system_in_container(target_root, config_data, progress_callback=No
     # Locale
     locale = config_data.get('language', {}).get('locale')
     if locale:
-        success, err, _ = _run_in_container(target_root, ["localectl", "set-locale", f"LANG={locale}"], "Set Locale", progress_callback, timeout=15)
+        success, err, _ = _run_in_chroot(target_root, ["localectl", "set-locale", f"LANG={locale}"], "Set Locale", progress_callback, timeout=15)
         if not success: return False, err
     else:
          print("Skipping locale configuration (not provided).")
@@ -131,7 +195,7 @@ def configure_system_in_container(target_root, config_data, progress_callback=No
     # Keymap
     keymap = config_data.get('keyboard', {}).get('layout')
     if keymap:
-        success, err, _ = _run_in_container(target_root, ["localectl", "set-keymap", keymap], "Set Keymap", progress_callback, timeout=15)
+        success, err, _ = _run_in_chroot(target_root, ["localectl", "set-keymap", keymap], "Set Keymap", progress_callback, timeout=15)
         if not success: return False, err
     else:
         print("Skipping keymap configuration (not provided).")
@@ -139,7 +203,7 @@ def configure_system_in_container(target_root, config_data, progress_callback=No
     # Hostname
     hostname = config_data.get('network', {}).get('hostname')
     if hostname:
-        success, err, _ = _run_in_container(target_root, ["hostnamectl", "set-hostname", hostname], "Set Hostname", progress_callback, timeout=15)
+        success, err, _ = _run_in_chroot(target_root, ["hostnamectl", "set-hostname", hostname], "Set Hostname", progress_callback, timeout=15)
         if not success: return False, err
     else:
         print("Skipping hostname configuration (not provided).")
@@ -147,7 +211,7 @@ def configure_system_in_container(target_root, config_data, progress_callback=No
     return True, ""
 
 def create_user_in_container(target_root, user_config, progress_callback=None):
-    """Creates user account in target via systemd-nspawn."""
+    """Creates user account in target via chroot."""
     username = user_config.get('username')
     password = user_config.get('password', None) # Get password from config
     is_admin = user_config.get('is_admin', False)
@@ -167,13 +231,13 @@ def create_user_in_container(target_root, user_config, progress_callback=None):
         useradd_cmd.extend(["-G", "wheel"]) # Add to wheel group for sudo
     useradd_cmd.append(username)
     
-    success, err, _ = _run_in_container(target_root, useradd_cmd, f"Create User {username}", progress_callback, timeout=30)
+    success, err, _ = _run_in_chroot(target_root, useradd_cmd, f"Create User {username}", progress_callback, timeout=30)
     if not success: return False, err, None
     
     # Set password using chpasswd - only if password was provided
     if password is not None: # Check if password exists (even if empty string, let chpasswd decide)
         chpasswd_input = f"{username}:{password}"
-        success, err, _ = _run_in_container(target_root, ["chpasswd"], f"Set Password for {username}", progress_callback, timeout=15, pipe_input=chpasswd_input)
+        success, err, _ = _run_in_chroot(target_root, ["chpasswd"], f"Set Password for {username}", progress_callback, timeout=15, pipe_input=chpasswd_input)
         if not success: 
             print(f"Warning: Failed to set password for {username} after user creation: {err}")
             # Decide if this should be a fatal error for the whole installation
@@ -342,7 +406,7 @@ def install_packages_dnf(target_root, progress_callback=None):
         else:
              print(f"SUCCESS: DNF installation completed.")
              if progress_callback: progress_callback("DNF installation complete.", 1.0)
-             # Optionally enable NetworkManager here (but requires _run_in_container, which uses _run_command)
+             # Optionally enable NetworkManager here (but requires _run_in_chroot, which uses _run_command)
              # Consider moving NM enable to a separate step after this function returns success.
              return True, ""
             
@@ -370,14 +434,14 @@ def install_packages_dnf(target_root, progress_callback=None):
              if process.stderr and not process.stderr.closed: process.stderr.close()
 
 # --- Move NetworkManager Enable --- 
-# We need a function that uses _run_in_container (and thus _run_command for root check)
+# We need a function that uses _run_in_chroot (and thus _run_command for root check)
 def enable_network_manager(target_root, progress_callback=None):
-    """Enables NetworkManager service in the target system."""
+    """Enables NetworkManager service in the target system via chroot."""
     if progress_callback:
         progress_callback("Enabling NetworkManager service...", 0.96) # Example fraction
     
     nm_enable_cmd = ["systemctl", "enable", "NetworkManager.service"]
-    success, err, _ = _run_in_container(target_root, nm_enable_cmd, "Enable NetworkManager Service", progress_callback=None, timeout=30)
+    success, err, _ = _run_in_chroot(target_root, nm_enable_cmd, "Enable NetworkManager Service", progress_callback=None, timeout=30)
     if not success: 
         warning_msg = f"Warning: Failed to enable NetworkManager service: {err}"
         print(warning_msg)
@@ -392,7 +456,7 @@ def enable_network_manager(target_root, progress_callback=None):
 # --- Bootloader Installation ---
 
 def install_bootloader_in_container(target_root, primary_disk, progress_callback=None):
-    """Installs GRUB2 bootloader via systemd-nspawn."""
+    """Installs GRUB2 bootloader via chroot."""
     
     # Detect if system is likely UEFI (check for /sys/firmware/efi)
     is_uefi = os.path.exists("/sys/firmware/efi")
@@ -419,13 +483,13 @@ def install_bootloader_in_container(target_root, primary_disk, progress_callback
             grub_target_disk # Install to the disk MBR/boot sector
         ]
 
-    success, err, _ = _run_in_container(target_root, grub_install_cmd, "Install GRUB", progress_callback, timeout=120)
+    success, err, _ = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB", progress_callback, timeout=120)
     if not success: return False, err, None
     
     # Generate GRUB config
     # Ensure /boot is mounted correctly within the container context
     grub_mkconfig_cmd = ["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"]
-    success, err, _ = _run_in_container(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
+    success, err, _ = _run_in_chroot(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
     if not success: return False, err, None
 
     return True, "", None 
