@@ -668,9 +668,21 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         shim_target_path = os.path.join(boot_target_dir, "BOOTX64.EFI") # Shim takes the default boot path
         grub_target_path = os.path.join(boot_target_dir, "grubx64.efi") # GRUB loaded by Shim
         
-        # Define source paths within the installed system (target_root)
-        # Paths might vary slightly based on distro version, adjust if needed
-        shim_source_path = os.path.join(target_root, "usr/share/shim/x64/shimx64.efi") 
+        # Define potential source paths within the installed system (target_root)
+        potential_shim_paths = [
+            "usr/share/shim/x64/shimx64.efi",
+            "usr/share/shim/x86_64/shimx64.efi",
+            "usr/lib/shim/shimx64.efi"
+        ]
+        shim_source_path = None
+        for path in potential_shim_paths:
+            full_path = os.path.join(target_root, path)
+            if os.path.exists(full_path):
+                shim_source_path = full_path
+                print(f"  Found shimx64.efi at: {shim_source_path}")
+                break
+        
+        # Define source path for GRUB EFI file
         grub_source_path = os.path.join(target_root, "usr/lib/grub/x86_64-efi/grubx64.efi")
         
         try:
@@ -679,8 +691,8 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             os.makedirs(boot_target_dir, exist_ok=True)
             
             # 2. Copy Shim (as BOOTX64.EFI)
-            if not os.path.exists(shim_source_path):
-                 return False, f"Shim source file not found at {shim_source_path}. Ensure shim-x64 is installed.", None
+            if not shim_source_path:
+                 return False, f"Shim source file (shimx64.efi) not found in potential locations: {potential_shim_paths}. Ensure shim-x64 is installed.", None
             print(f"  Copying {shim_source_path} -> {shim_target_path}...")
             shutil.copy2(shim_source_path, shim_target_path)
             
