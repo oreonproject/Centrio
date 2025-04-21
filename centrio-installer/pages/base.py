@@ -6,10 +6,18 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, Gio, GLib
 
-# Use constants from the dedicated file
+# Use constants from the dedicated file (Reverted import)
 from ..constants import ANACONDA_BUS_ADDR_FILE, DBUS_ANACONDA_SESSION_ADDRESS
-# Use D-Bus availability check and error class from utils
-from ..utils import dasbus, DBusError, dbus_available
+# Use D-Bus availability check and error class from utils (Reverted import)
+# D-Bus might be optional now, handle import error gracefully
+try:
+    from ..utils import dasbus, DBusError, dbus_available
+except ImportError:
+    # If utils doesn't expose them or dasbus isn't installed
+    dbus_available = False
+    DBusError = Exception # Define DBusError as base Exception
+    dasbus = None
+    print("Warning: Failed to import D-Bus utilities (dasbus). D-Bus functionality may be limited.")
 
 
 class BaseConfigurationPage(Adw.PreferencesPage):

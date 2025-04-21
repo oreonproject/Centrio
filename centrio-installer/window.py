@@ -5,7 +5,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib
 
-# Import Page classes
+# Import Page classes (Reverted to relative imports)
 from .pages.welcome import WelcomePage
 from .pages.summary import SummaryPage
 from .pages.progress import ProgressPage
@@ -142,17 +142,27 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
         self.navigate_to_page("summary")
 
     def mark_config_complete(self, key, is_complete, config_values=None):
-        """Mark config as complete, store final values, and update summary UI."""
+        """Mark config as complete, store final values ONCE, and update summary UI."""
         if key in self.config_state:
+            print(f">>> mark_config_complete called for key='{key}', is_complete={is_complete}, has_config_values={config_values is not None}")
+            
+            # Check if we are newly marking as complete or re-marking
+            was_already_complete = self.config_state.get(key, False)
             self.config_state[key] = is_complete
-            if is_complete and config_values is not None:
+            
+            # Only store config_values the FIRST time it's marked complete
+            if is_complete and config_values is not None and not was_already_complete:
                  # Store the actual configuration data passed back
                  self.final_config[key] = config_values
-                 print(f"Stored final config for '{key}': {config_values}")
+                 print(f"  Stored final config for '{key}': {config_values}")
+            elif is_complete and config_values is not None and was_already_complete:
+                 print(f"  Skipping config storage for '{key}' (already marked complete).")
             elif not is_complete and key in self.final_config:
                  # Remove config if marked incomplete again (e.g., user goes back)
-                 print(f"Removing final config for '{key}'")
+                 print(f"  Removing final config for '{key}'")
                  del self.final_config[key]
+            elif is_complete and config_values is None:
+                 print(f"  Skipping config storage for '{key}' (no config_values provided).")
                  
             # Update the corresponding row in the SummaryPage
             if hasattr(self, 'summary_page'): # Ensure summary page exists

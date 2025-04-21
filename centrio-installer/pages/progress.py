@@ -15,26 +15,40 @@ from .. import backend
 
 class ProgressPage(Gtk.Box):
     def __init__(self, **kwargs):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18, **kwargs)
-        self.set_margin_top(36)
-        self.set_margin_bottom(36)
-        self.set_margin_start(48)
-        self.set_margin_end(48)
-        self.set_valign(Gtk.Align.CENTER)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6, **kwargs)
+        # Main box contains ScrolledWindow and potentially other fixed elements if needed
         self.set_vexpand(True)
 
+        # --- Scrolled Window for Content --- 
+        scrolled_window = Gtk.ScrolledWindow()
+        scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC) # Allow vertical scroll
+        scrolled_window.set_vexpand(True)
+        self.append(scrolled_window)
+        
+        # --- Content Box (Inside Scrolled Window) --- 
+        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        content_box.set_margin_top(36)
+        content_box.set_margin_bottom(36)
+        content_box.set_margin_start(48)
+        content_box.set_margin_end(48)
+        # Removed valign=CENTER and vexpand=True from content_box, ScrolledWindow handles expansion
+        scrolled_window.set_child(content_box)
+
+        # Add widgets to the content_box
         title = Gtk.Label(label="Installing System")
         title.add_css_class("title-1")
-        self.append(title)
+        content_box.append(title)
 
         self.progress_bar = Gtk.ProgressBar(show_text=True, text="Starting installation...")
         self.progress_bar.set_pulse_step(0.1)
-        self.append(self.progress_bar)
+        content_box.append(self.progress_bar)
 
         self.progress_label = Gtk.Label(label="")
         self.progress_label.set_wrap(True)
-        self.append(self.progress_label)
+        self.progress_label.set_xalign(0.0) # Align text to the left
+        content_box.append(self.progress_label)
 
+        # --- State Variables --- 
         self.progress_value = 0.0
         self.installation_error = None # Store any fatal error message
         self.target_root = "/mnt/sysimage" # Define the target mount point
@@ -43,18 +57,17 @@ class ProgressPage(Gtk.Box):
         self.disk_config = None # Store disk_config for potential unmount later
 
     def _update_progress_text(self, text, fraction=None):
-        """Helper to update progress bar text and optionally fraction."""
+        """Helper to update progress bar text and optionally fraction via GLib.idle_add."""
         def update():
+            # This code runs in the main GTK thread
             self.progress_label.set_text(text)
             if fraction is not None:
                 self.progress_bar.set_fraction(fraction)
                 self.progress_bar.set_text(f"{int(fraction * 100)}%")
             print(f"Progress: {text} ({fraction})") # Log progress
+        # Schedule the UI update on the main thread
         GLib.idle_add(update)
-        # Allow UI updates during long steps
-        while Gtk.events_pending():
-            Gtk.main_iteration()
-        
+
     def _attempt_unmount(self):
         """Attempts to unmount filesystems mounted under target_root."""
         print("Attempting to unmount target filesystems...")
