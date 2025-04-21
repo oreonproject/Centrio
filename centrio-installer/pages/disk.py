@@ -228,55 +228,81 @@ class DiskPage(BaseConfigurationPage):
             if current_path.startswith("/dev/loop"):
                 print(f"  Path {current_path} is a loop device. Finding backing file...")
                 try:
-                    cmd = ["losetup", "-O", "BACK-FILE", "--noheadings", current_path]
-                    result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
-                    backing_file = result.stdout.strip()
+                    # Get Backing File path
+                    cmd_losetup = ["losetup", "-O", "BACK-FILE", "--noheadings", current_path]
+                    result_losetup = subprocess.run(cmd_losetup, capture_output=True, text=True, check=True, timeout=5)
+                    backing_file = result_losetup.stdout.strip()
                     print(f"    Loop device {current_path} backing file: {backing_file}")
 
-                    if backing_file:
-                        print(f"    Finding mountpoint containing backing file: {backing_file}...")
-                        best_match_mount = None
-                        best_match_len = -1
+                    if backing_file and backing_file != "(deleted)": # Cannot trace deleted backing files reliably yet
+                        backing_file_dir = os.path.dirname(backing_file)
+                        print(f"    Finding mountpoint containing backing file directory: {backing_file_dir}...")
 
-                        try:
-                             mount_cmd = ["findmnt", "-J", "-o", "SOURCE,TARGET"]
-                             mount_result = subprocess.run(mount_cmd, capture_output=True, text=True, check=True, timeout=5)
-                             mount_data = json.loads(mount_result.stdout)
-                             for fs in mount_data.get("filesystems", []):
-                                 mountpoint = fs.get("target")
-                                 if not mountpoint: continue
-                                 try:
-                                     real_mountpoint = os.path.realpath(mountpoint)
-                                     # Check if backing file starts with the mount point path
-                                     # Ensure mountpoint check is robust (add '/' if needed)
-                                     check_mountpoint = real_mountpoint if real_mountpoint.endswith('/') else real_mountpoint + '/'
-                                     if backing_file.startswith(check_mountpoint) or backing_file == real_mountpoint:
-                                         if len(real_mountpoint) > best_match_len:
-                                             best_match_len = len(real_mountpoint)
-                                             best_match_mount = fs
-                                 except Exception as realpath_e:
-                                     print(f"      Warning: could not resolve realpath for {mountpoint}: {realpath_e}")
-                                     pass # Ignore errors resolving realpath for specific mounts
+                        # Use findmnt to find the source device for the directory containing the backing file
+                        # findmnt -n -o SOURCE --target /path/to/dir
+                        cmd_findmnt_src = ["findmnt", "-n", "-o", "SOURCE", "--target", backing_file_dir]
+                        result_findmnt_src = subprocess.run(cmd_findmnt_src, capture_output=True, text=True, check=True, timeout=5)
+                        source_device = result_findmnt_src.stdout.strip()
 
-                             if best_match_mount:
-                                 source_device = best_match_mount.get("source")
-                                 print(f"    Backing file is on source device: {source_device} mounted at {best_match_mount.get('target')}")
-                                 current_path = source_device # Continue tracing from the mount source
-                                 continue # Restart loop with the new source device path
-                             else:
-                                 print(f"    ERROR: Could not find mountpoint containing backing file {backing_file}")
-                                 return None
-                        except Exception as findmnt_e:
-                             print(f"    ERROR: Failed to run findmnt to locate backing file: {findmnt_e}")
-                             return None
+                        if source_device:
+                            print(f"    Backing file directory {backing_file_dir} is on source device: {source_device}")
+                            current_path = source_device # Continue tracing from the source device
+                            continue # Restart loop with the new source device path
+                        else:
+                            print(f"    ERROR: Could not find source device for backing file directory {backing_file_dir}")
+                            return None
+                    elif backing_file == "(deleted)":
+                         # --- Attempt to trace via the loop device's parent in lsblk ---
+                         # This is a fallback if the backing file is deleted (common in overlayfs)
+                         print(f"    Backing file for {current_path} is deleted (overlayfs?). Trying lsblk parent (pkname)...")
+                         if current_path in path_map:
+                              parent_path = path_map[current_path]["pkname"]
+                              if parent_path:
+                                   print(f"    Found lsblk parent (pkname): {parent_path}. Continuing trace from parent.")
+                                   current_path = parent_path
+                                   continue # Restart loop with the parent device path
+                              else:
+                                   print(f"    ERROR: Loop device {current_path} with deleted backing file has no pkname in lsblk.")
+                                   return None
+                         else:
+                              # Should not happen if map was built correctly
+                              print(f"    ERROR: Loop device {current_path} not found in path_map for pkname lookup.")
+                              return None
+                         # --- End Fallback ---
                     else:
                          print(f"    ERROR: Could not determine backing file for {current_path}")
                          return None
-                except Exception as losetup_e:
-                    print(f"  ERROR: Failed to process loop device {current_path}: {losetup_e}")
+                except subprocess.CalledProcessError as e:
+                     print(f"  ERROR: Command failed while processing loop device {current_path}: {' '.join(e.cmd)}")
+                     print(f"  Stderr: {e.stderr}")
+                     return None
+                except Exception as e:
+                    print(f"  ERROR: Failed to process loop device {current_path}: {e}")
                     return None
             # --- End Handle Loop Device ---
+            
+            # --- Handle Device Mapper ---
+            # Example: /dev/mapper/live-rw often maps to a loop device
+            # We need to check if current_path *itself* has a pkname that is useful
+            elif current_path.startswith("/dev/mapper/"):
+                 print(f"  Path {current_path} is a device mapper device. Checking lsblk parent (pkname)...")
+                 if current_path in path_map:
+                      parent_path = path_map[current_path]["pkname"]
+                      if parent_path:
+                           print(f"    Found lsblk parent (pkname): {parent_path}. Continuing trace from parent.")
+                           current_path = parent_path
+                           continue # Restart loop with parent path
+                      else:
+                           # Sometimes DM devices don't have a direct pkname in lsblk?
+                           # Could try 'dmsetup deps' but let's rely on lsblk for now.
+                           print(f"    Warning: Device mapper path {current_path} has no pkname in lsblk.")
+                           # Proceed to general check below, maybe it's listed directly?
+                 else:
+                      # Should not happen if map was built correctly
+                      print(f"    ERROR: Device mapper path {current_path} not found in path_map for pkname lookup.")
+                      # Proceed to general check? Might fail.
 
+            # --- General Path Check ---
             if current_path not in path_map:
                 print(f"  Error: Path {current_path} not found in initial lsblk map.")
                 # This can happen if findmnt source is e.g. /dev/dm-N which wasn't the original root source
