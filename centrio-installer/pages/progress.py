@@ -582,20 +582,28 @@ class ProgressPage(Gtk.Box):
             self._update_progress_text("Bootloader installation skipped.", 0.9)
             return True
 
-        primary_disk = disk_config.get('auto_partition_plan', {}).get('primary_disk')
-        if not primary_disk:
-             # Try getting first target disk if plan wasn't populated (e.g., manual mode placeholder)
-             primary_disk = disk_config.get('target_disks', [None])[0]
+        # Determine primary disk and EFI partition (if exists)
+        primary_disk = disk_config.get('target_disks', [None])[0]
+        efi_partition_device = None
+        partitions = disk_config.get('partitions', [])
+        for part in partitions:
+            if part.get('mountpoint') == '/boot/efi':
+                efi_partition_device = part.get('device')
+                print(f"Found EFI partition device: {efi_partition_device}")
+                break
         
         if not primary_disk:
              self.installation_error = "Cannot determine target disk for bootloader installation."
              return False
+        # Note: We might proceed even without an EFI partition found here, 
+        # backend function will handle BIOS vs UEFI logic.
 
         self._update_progress_text("Installing bootloader...", 0.9)
         
         success, err, _ = backend.install_bootloader_in_container(
             self.target_root, 
             primary_disk, 
+            efi_partition_device, # Pass EFI partition device
             progress_callback=self._update_progress_text
         )
         

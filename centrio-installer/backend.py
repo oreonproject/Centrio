@@ -647,7 +647,7 @@ def enable_network_manager(target_root, progress_callback=None):
 
 # --- Bootloader Installation ---
 
-def install_bootloader_in_container(target_root, primary_disk, progress_callback=None):
+def install_bootloader_in_container(target_root, primary_disk, efi_partition_device, progress_callback=None):
     """Installs GRUB2 bootloader via chroot."""
     
     # Detect if system is likely UEFI (check for /sys/firmware/efi)
@@ -676,10 +676,50 @@ def install_bootloader_in_container(target_root, primary_disk, progress_callback
             grub_target_disk # Install to the disk MBR/boot sector
         ]
 
+    # --- Run grub2-install --- 
     success, err, _ = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB", progress_callback, timeout=120)
     if not success: return False, err, None
     
-    # Generate GRUB config
+    # --- Run efibootmgr for UEFI --- 
+    if is_uefi:
+        if not efi_partition_device:
+            print("Warning: UEFI system detected but EFI partition device path not provided. Cannot run efibootmgr.")
+            # Decide if this is fatal? Maybe grub2-install alone worked?
+            # Let's proceed but log warning.
+        else:
+            print(f"Attempting to register boot entry using efibootmgr for {efi_partition_device}...")
+            # Derive disk and partition number from efi_partition_device
+            # Assumes format like /dev/sda1, /dev/nvme0n1p1
+            match = re.match(r"(/dev/[a-zA-Z]+)(\d+)", efi_partition_device) or \
+                    re.match(r"(/dev/nvme\d+n\d+)p(\d+)", efi_partition_device)
+            
+            if match:
+                efi_disk = match.group(1)
+                efi_part_num = match.group(2)
+                # Boot loader path for --removable is standard EFI/BOOT/BOOTX64.EFI
+                # Need backslashes for UEFI path
+                loader_path = "\\EFI\\BOOT\\BOOTX64.EFI"
+                
+                efibootmgr_cmd = [
+                    "efibootmgr",
+                    "-c",                     # Create new entry
+                    "-d", efi_disk,           # Disk containing EFI partition
+                    "-p", efi_part_num,       # EFI partition number
+                    "-L", "Centrio",          # Boot entry label
+                    "-l", loader_path         # Path to the EFI loader file
+                ]
+                
+                # Run efibootmgr inside chroot
+                efibm_success, efibm_err, _ = _run_in_chroot(target_root, efibootmgr_cmd, "Register EFI Boot Entry", progress_callback, timeout=60)
+                if not efibm_success:
+                    # Don't fail installation, but log a clear warning
+                    print(f"Warning: efibootmgr failed to create boot entry: {efibm_err}")
+                else:
+                    print("Successfully registered boot entry with efibootmgr.")
+            else:
+                print(f"Warning: Could not parse disk and partition number from EFI device {efi_partition_device}. Cannot run efibootmgr.")
+
+    # --- Generate GRUB config (Common) --- 
     # Ensure /boot is mounted correctly within the container context
     grub_mkconfig_cmd = ["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"]
     success, err, _ = _run_in_chroot(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
