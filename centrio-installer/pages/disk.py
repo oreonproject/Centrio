@@ -357,13 +357,20 @@ class DiskPage(BaseConfigurationPage):
             config_values["commands"] = []
             config_values["partitions"] = []
 
-        # Show confirmation toast
-        if config_values["commands"]:
-            self.show_toast(f"Storage plan confirmed ({self.partitioning_method}). Commands generated.")
-        else:
-            self.show_toast(f"Storage plan confirmed ({self.partitioning_method}). No commands generated (Manual not impl.).")
+        # Show confirmation toast - COMMENTED OUT
+        # if self.partitioning_method == \"AUTOMATIC\":
+        #     self.show_toast(f\"Storage plan confirmed (Automatic). Commands generated.\")
+        # elif self.partitioning_method == \"MANUAL\":
+        #      if config_values[\"partitions\"]:
+        #           self.show_toast(f\"Storage plan confirmed (Manual). Found partitions to use.\")
+        #      else:
+        #           # Should have returned earlier if no partitions found
+        #           self.show_toast(\"Storage plan confirmed (Manual), but partition detection failed.\")
+        # else:
+        #      # Fallback for potentially other methods if added later
+        #      self.show_toast(f\"Storage plan confirmed ({self.partitioning_method}).\")
             
-        # Pass the detailed configuration (including commands) back
+        print("Storage plan confirmed. Returning to summary.") # Keep terminal log
         super().mark_complete_and_return(button, config_values=config_values)
         
         # --- TODO: Implement actual partitioning logic here --- 
