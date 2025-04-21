@@ -154,6 +154,17 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
              except OSError as e:
                  raise RuntimeError(f"Failed to create target directory {resolv_conf_dir}: {e}") from e
                  
+        # Ensure target /etc/resolv.conf file exists for bind mount
+        # --- Block MODIFIED TO DO NOTHING --- 
+        if not os.path.exists(resolv_conf_target):
+            # Try block is now empty
+            try:
+                pass # Do nothing, file should be copied by progress.py
+            except OSError as e:
+                 # This should now be unreachable
+                 raise RuntimeError(f"Failed to create target file {resolv_conf_target}: {e}") from e
+        # --- End Block MODIFIED --- 
+                 
         if os.path.exists(host_dbus_socket):
              dbus_target_dir = os.path.dirname(mount_points["dbus"])
              try:
