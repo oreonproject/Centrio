@@ -289,41 +289,98 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
 # --- Configuration Functions ---
 
 def configure_system_in_container(target_root, config_data, progress_callback=None):
-    """Configures timezone, locale, keyboard, hostname in target via chroot."""
+    """Configures timezone, locale, keyboard, hostname in target via chroot.
+    Modified to write directly to config files instead of using systemd tools.
+    """
+    all_success = True
+    errors = []
     
-    # Timezone
+    # --- Timezone --- 
     tz = config_data.get('timedate', {}).get('timezone')
     if tz:
-        success, err, _ = _run_in_chroot(target_root, ["timedatectl", "set-timezone", tz], "Set Timezone", progress_callback, timeout=15)
-        if not success: return False, err
+        print(f"Configuring Timezone to {tz}...")
+        tz_file_path = os.path.join(target_root, "etc/timezone")
+        localtime_path = os.path.join(target_root, "etc/localtime")
+        zoneinfo_path = os.path.join(target_root, f"usr/share/zoneinfo/{tz}")
+        
+        try:
+            # Write timezone name to /etc/timezone
+            print(f"  Writing timezone name to {tz_file_path}...")
+            with open(tz_file_path, 'w') as f:
+                f.write(f"{tz}\n")
+            
+            # Link /etc/localtime to zoneinfo file
+            if os.path.exists(zoneinfo_path):
+                print(f"  Linking {localtime_path} -> {zoneinfo_path}...")
+                # Remove existing link/file first if it exists
+                if os.path.lexists(localtime_path):
+                    os.remove(localtime_path)
+                os.symlink(f"/usr/share/zoneinfo/{tz}", localtime_path) # Link relative to root
+            else:
+                print(f"  Warning: Zoneinfo file not found at {zoneinfo_path}. Cannot link /etc/localtime.")
+                # Don't mark as failure, system might cope or use /etc/timezone
+                
+        except Exception as e:
+            err_msg = f"Failed to configure timezone {tz}: {e}"
+            print(f"  ERROR: {err_msg}")
+            errors.append(err_msg)
+            all_success = False
     else:
         print("Skipping timezone configuration (not provided).")
 
-    # Locale
+    # --- Locale --- 
     locale = config_data.get('language', {}).get('locale')
     if locale:
-        success, err, _ = _run_in_chroot(target_root, ["localectl", "set-locale", f"LANG={locale}"], "Set Locale", progress_callback, timeout=15)
-        if not success: return False, err
+        print(f"Configuring Locale to {locale}...")
+        locale_conf_path = os.path.join(target_root, "etc/locale.conf")
+        try:
+            print(f"  Writing locale to {locale_conf_path}...")
+            with open(locale_conf_path, 'w') as f:
+                f.write(f"LANG={locale}\n")
+        except Exception as e:
+            err_msg = f"Failed to configure locale {locale}: {e}"
+            print(f"  ERROR: {err_msg}")
+            errors.append(err_msg)
+            all_success = False
     else:
          print("Skipping locale configuration (not provided).")
 
-    # Keymap
+    # --- Keymap --- 
     keymap = config_data.get('keyboard', {}).get('layout')
     if keymap:
-        success, err, _ = _run_in_chroot(target_root, ["localectl", "set-keymap", keymap], "Set Keymap", progress_callback, timeout=15)
-        if not success: return False, err
+        print(f"Configuring Keymap to {keymap}...")
+        vconsole_conf_path = os.path.join(target_root, "etc/vconsole.conf")
+        try:
+            print(f"  Writing keymap to {vconsole_conf_path}...")
+            with open(vconsole_conf_path, 'w') as f:
+                f.write(f"KEYMAP={keymap}\n")
+        except Exception as e:
+            err_msg = f"Failed to configure keymap {keymap}: {e}"
+            print(f"  ERROR: {err_msg}")
+            errors.append(err_msg)
+            all_success = False
     else:
         print("Skipping keymap configuration (not provided).")
         
-    # Hostname
+    # --- Hostname --- 
     hostname = config_data.get('network', {}).get('hostname')
     if hostname:
-        success, err, _ = _run_in_chroot(target_root, ["hostnamectl", "set-hostname", hostname], "Set Hostname", progress_callback, timeout=15)
-        if not success: return False, err
+        print(f"Configuring Hostname to {hostname}...")
+        hostname_path = os.path.join(target_root, "etc/hostname")
+        try:
+            print(f"  Writing hostname to {hostname_path}...")
+            with open(hostname_path, 'w') as f:
+                f.write(f"{hostname}\n")
+        except Exception as e:
+            err_msg = f"Failed to configure hostname {hostname}: {e}"
+            print(f"  ERROR: {err_msg}")
+            errors.append(err_msg)
+            all_success = False
     else:
         print("Skipping hostname configuration (not provided).")
 
-    return True, ""
+    final_error_str = "\n".join(errors)
+    return all_success, final_error_str
 
 def create_user_in_container(target_root, user_config, progress_callback=None):
     """Creates user account in target via chroot."""
