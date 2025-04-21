@@ -152,10 +152,10 @@ class ProgressPage(Gtk.Box):
             else:
                  print(f"LVM deactivation check complete for {primary_disk}.")
                  
-            # --- Pre-emptive Unmount (using findmnt) --- 
+            # --- Pre-emptive Unmount --- 
             self._update_progress_text(f"Checking existing mounts on {primary_disk}...", 0.02)
             mount_targets_to_check = set()
-            device_paths_to_check = set([primary_disk]) # Start with the base disk
+            device_paths_to_check = set([primary_disk])
             try:
                 # Get all related device paths (disk + partitions)
                 lsblk_cmd = ["lsblk", "-n", "-o", "PATH", "--raw", primary_disk]
@@ -180,11 +180,29 @@ class ProgressPage(Gtk.Box):
                         mount_targets_to_check.update(mount_points)
                     # Ignore errors or no output for individual checks
 
-            except FileNotFoundError:
-                 print("  Warning: 'lsblk' or 'findmnt' command not found. Cannot reliably check for mounts.")
             except Exception as e:
-                print(f"  Warning: Error during mount check: {e}")
+                print(f"Warning: lsblk failed, proceeding with only {primary_disk}")
+            
+            try:
+                # Check each mount point for active processes using lsof
+                print(f"Running lsof on paths: {list(mount_targets_to_check)} to check for busy resources...")
+                for path in sorted(list(mount_targets_to_check), reverse=True):
+                    print(f"  Checking lsof on {path}...")
+                    lsof_cmd = ["lsof", path]
+                    lsof_success, lsof_err, lsof_stdout = backend._run_command(lsof_cmd, f"Check Processes on {path}", timeout=15)
+                    
+                    if lsof_stdout:
+                        err_msg_detail = f"Device path {path} is busy. Processes found by lsof:\n{lsof_stdout}"
+                        print(f"ERROR: {err_msg_detail}")
+                        self.installation_error = err_msg_detail
+                        return False # Fail immediately
+                    elif not lsof_success and ("Cannot run program" in lsof_err or "Command not found" in lsof_err):
+                        print(f"  Warning: lsof command not found for check on {path}.")
+                    # else: lsof check passed for this path
 
+            except Exception as e:
+                print(f"Warning: findmnt check failed: {e}")
+                
             # --- Attempt Unmount --- 
             unmount_failed = False
             if mount_targets_to_check:
@@ -222,23 +240,31 @@ class ProgressPage(Gtk.Box):
             else:
                 print("  No active mount points identified to unmount.")
                 
-            if unmount_failed:
-                return False # Exit if unmount failed
+            # Add explicit unmount attempt on the base device itself
+            print(f"Attempting final unmount on base device {primary_disk}...")
+            try:
+                 subprocess.run(["umount", primary_disk], check=False, capture_output=True, text=True, timeout=10)
+            except Exception as base_umount_e:
+                 print(f"  Warning: Error during final base device umount: {base_umount_e}")
+                 
+            if unmount_failed: # Check result from loop above
+                 return False
 
-            # --- Run partprobe, udevadm settle and sync --- 
+            # --- Reread Partitions, Remove DM, Settle, Sync --- 
             print(f"Running partprobe on {primary_disk}...")
             try:
                 partprobe_cmd = ["partprobe", primary_disk]
-                # Use backend runner as partprobe often needs root
                 pp_success, pp_err, _ = backend._run_command(partprobe_cmd, f"Reread partitions on {primary_disk}", timeout=30)
-                if pp_success:
-                     print("  Partprobe successful.")
-                else:
-                     # Log error but don't necessarily fail, maybe device has no partitions yet
-                     print(f"  Warning: partprobe failed for {primary_disk}: {pp_err}")
-                time.sleep(2) # Pause after partprobe
-            except Exception as pp_e:
-                 print(f"Warning: Error running partprobe: {pp_e}")
+                if not pp_success: print(f"  Warning: partprobe failed: {pp_err}")
+                time.sleep(5) # Increased pause after partprobe
+            except Exception as pp_e: print(f"Warning: Error running partprobe: {pp_e}")
+            
+            # Add dmsetup remove
+            dm_success, dm_warn = backend._remove_dm_mappings(primary_disk, self._update_progress_text)
+            if not dm_success: # Should always return True, but check anyway
+                 print(f"Warning: dmsetup removal step indicated failure (ignored): {dm_warn}")
+            if dm_warn: print(f"Note: {dm_warn}") # Print any warning message
+            time.sleep(1) # Pause after dmsetup
                  
             print("Running udevadm settle...")
             try:
@@ -258,36 +284,7 @@ class ProgressPage(Gtk.Box):
             except Exception as sync_e:
                  print(f"Warning: Error running sync: {sync_e}")
 
-            # --- lsof Check (Targeted) --- 
-            self._update_progress_text(f"Checking for processes using {primary_disk} or its partitions...", 0.03)
-            lsof_found_processes = False
-            # Re-fetch device paths in case partprobe changed something? (Probably not needed)
-            final_device_paths_to_lsof = device_paths_to_check # Use paths found earlier
-            print(f"Running lsof on paths: {list(final_device_paths_to_lsof)} to check for busy resources...")
-            
-            for dev_path in final_device_paths_to_lsof:
-                print(f"  Checking lsof on {dev_path}...")
-                lsof_cmd = ["lsof", dev_path]
-                lsof_success, lsof_err, lsof_stdout = backend._run_command(lsof_cmd, f"Check Processes on {dev_path}", timeout=15)
-                
-                if lsof_stdout:
-                    err_msg_detail = f"Device path {dev_path} is busy. Processes found by lsof:\n{lsof_stdout}"
-                    print(f"ERROR: {err_msg_detail}")
-                    self.installation_error = err_msg_detail
-                    lsof_found_processes = True
-                    break # Found processes on one path, no need to check others
-                elif not lsof_success and ("Cannot run program" in lsof_err or "Command not found" in lsof_err):
-                     print(f"  Warning: lsof command not found or failed to execute for {dev_path}. Cannot verify device is free. Error: {lsof_err}")
-                     # Continue checking other paths, but maybe flag this?
-                # else: # lsof ran successfully with no output for this path
-                    # print(f"    lsof check passed for {dev_path}.")
-
-            if lsof_found_processes:
-                return False # A process was found holding one of the device paths
-            else:
-                 print(f"  lsof checks passed for all paths: {list(final_device_paths_to_lsof)}.")
-                
-            self._update_progress_text("Disk checks complete.", 0.04) # Renamed message
+            self._update_progress_text("Disk checks complete.", 0.04)
 
         # --- Execute Main Storage Actions ---
         if method == "AUTOMATIC":
@@ -297,22 +294,54 @@ class ProgressPage(Gtk.Box):
                 
             self._update_progress_text("Preparing storage devices...", 0.05)
             
-            # Execute Partitioning/Formatting Commands
             for i, cmd_list in enumerate(commands):
                 cmd_name = cmd_list[0]
-                progress_fraction = 0.1 + (0.15 * (i / len(commands)))
+                progress_fraction = 0.1 + (0.20 * (i / len(commands))) # Adjusted fraction range
                 
-                # Increase delay before wipefs
+                # --- Final LSOF Check + Delay JUST before wipefs --- 
                 if cmd_name == "wipefs" and primary_disk and primary_disk in cmd_list:
-                     print(f"Adding 5 second delay before executing {cmd_name} on {primary_disk}...")
-                     time.sleep(5)
-                     
-                # Use the backend runner (handles pkexec)
+                    print(f"--- Performing FINAL check before {cmd_name} on {primary_disk} ---")
+                    lsof_found_processes = False
+                    # Get device paths again in case partprobe changed them
+                    final_device_paths_to_lsof = set([primary_disk])
+                    try:
+                        lsblk_cmd = ["lsblk", "-n", "-o", "PATH", "--raw", primary_disk]
+                        lsblk_result = subprocess.run(lsblk_cmd, capture_output=True, text=True, check=False, timeout=10)
+                        if lsblk_result.returncode == 0:
+                            final_device_paths_to_lsof.update([line.strip() for line in lsblk_result.stdout.split('\n') if line.strip()])
+                    except Exception: pass # Ignore lsblk failure here
+                    
+                    print(f"Running final lsof on paths: {list(final_device_paths_to_lsof)}...")
+                    for dev_path in final_device_paths_to_lsof:
+                        lsof_cmd = ["lsof", dev_path]
+                        lsof_success, lsof_err, lsof_stdout = backend._run_command(lsof_cmd, f"Final Check on {dev_path}", timeout=15)
+                        if lsof_stdout:
+                            err_msg_detail = f"FINAL CHECK FAILED: Path {dev_path} is busy:\n{lsof_stdout}"
+                            print(f"ERROR: {err_msg_detail}")
+                            self.installation_error = err_msg_detail
+                            return False # Fail immediately
+                        elif not lsof_success and ("Cannot run program" in lsof_err or "Command not found" in lsof_err):
+                            print(f"  Warning: lsof command not found for final check on {dev_path}.")
+                        # else: lsof check passed for this path
+                        
+                    if not lsof_found_processes: # Should always be False if we got here
+                         print(f"  Final lsof checks passed for all paths.")
+                         print(f"Adding 5 second delay before executing {cmd_name}...")
+                         time.sleep(5)
+                    else:
+                         # This case should not be reached due to return above
+                         return False 
+                
+                # --- Execute command --- 
+                self._update_progress_text(f"Running: {cmd_name}...", progress_fraction)
                 success, err, _ = backend._run_command(cmd_list, f"Storage Step: {cmd_name}", self._update_progress_text, timeout=60)
                 if not success:
                     self.installation_error = err
+                    # Should we restart udisks2 here on failure?
+                    # backend._start_service("udisks2.service") # Maybe add this?
                     return False
-            self._update_progress_text("Partitioning and formatting complete.", 0.25)
+                    
+            self._update_progress_text("Partitioning and formatting complete.", 0.30) # End fraction adjusted
             
         elif method == "MANUAL":
             print("Manual partitioning selected. Skipping wipefs/parted/mkfs commands.")
