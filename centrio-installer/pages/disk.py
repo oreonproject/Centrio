@@ -5,6 +5,7 @@ import subprocess # For running lsblk
 import json       # For parsing lsblk output
 import shlex      # For safe command string generation
 import os         # For path manipulation
+import re # For parsing losetup
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib
@@ -198,7 +199,7 @@ class DiskPage(BaseConfigurationPage):
         # self._connect_dbus() 
             
     def find_physical_disk_for_path(self, target_path, block_devices):
-        """Traces a given path back to its parent physical disk using lsblk data."""
+        """Traces a given path back to its parent physical disk using lsblk data, handling loop devices."""
         print(f"--- Tracing physical disk for path: {target_path} ---")
         if not block_devices or not target_path:
             print("  Error: Missing block_devices or target_path.")
@@ -217,35 +218,99 @@ class DiskPage(BaseConfigurationPage):
 
         # Trace upwards from the target_path
         current_path = target_path
-        visited = set() # Prevent infinite loops in case of weird pkname links
+        visited = set() # Prevent infinite loops
+
         while current_path and current_path not in visited:
             visited.add(current_path)
             print(f"  Tracing: current_path = {current_path}")
+
+            # --- Handle Loop Device ---
+            if current_path.startswith("/dev/loop"):
+                print(f"  Path {current_path} is a loop device. Finding backing file...")
+                try:
+                    cmd = ["losetup", "-O", "BACK-FILE", "--noheadings", current_path]
+                    result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
+                    backing_file = result.stdout.strip()
+                    print(f"    Loop device {current_path} backing file: {backing_file}")
+
+                    if backing_file:
+                        print(f"    Finding mountpoint containing backing file: {backing_file}...")
+                        best_match_mount = None
+                        best_match_len = -1
+
+                        try:
+                             mount_cmd = ["findmnt", "-J", "-o", "SOURCE,TARGET"]
+                             mount_result = subprocess.run(mount_cmd, capture_output=True, text=True, check=True, timeout=5)
+                             mount_data = json.loads(mount_result.stdout)
+                             for fs in mount_data.get("filesystems", []):
+                                 mountpoint = fs.get("target")
+                                 if not mountpoint: continue
+                                 try:
+                                     real_mountpoint = os.path.realpath(mountpoint)
+                                     # Check if backing file starts with the mount point path
+                                     # Ensure mountpoint check is robust (add '/' if needed)
+                                     check_mountpoint = real_mountpoint if real_mountpoint.endswith('/') else real_mountpoint + '/'
+                                     if backing_file.startswith(check_mountpoint) or backing_file == real_mountpoint:
+                                         if len(real_mountpoint) > best_match_len:
+                                             best_match_len = len(real_mountpoint)
+                                             best_match_mount = fs
+                                 except Exception as realpath_e:
+                                     print(f"      Warning: could not resolve realpath for {mountpoint}: {realpath_e}")
+                                     pass # Ignore errors resolving realpath for specific mounts
+
+                             if best_match_mount:
+                                 source_device = best_match_mount.get("source")
+                                 print(f"    Backing file is on source device: {source_device} mounted at {best_match_mount.get('target')}")
+                                 current_path = source_device # Continue tracing from the mount source
+                                 continue # Restart loop with the new source device path
+                             else:
+                                 print(f"    ERROR: Could not find mountpoint containing backing file {backing_file}")
+                                 return None
+                        except Exception as findmnt_e:
+                             print(f"    ERROR: Failed to run findmnt to locate backing file: {findmnt_e}")
+                             return None
+                    else:
+                         print(f"    ERROR: Could not determine backing file for {current_path}")
+                         return None
+                except Exception as losetup_e:
+                    print(f"  ERROR: Failed to process loop device {current_path}: {losetup_e}")
+                    return None
+            # --- End Handle Loop Device ---
+
             if current_path not in path_map:
-                print(f"  Error: Path {current_path} not found in lsblk map.")
-                return None # Path not found in lsblk output
+                print(f"  Error: Path {current_path} not found in initial lsblk map.")
+                # This can happen if findmnt source is e.g. /dev/dm-N which wasn't the original root source
+                # Or if the loop device's backing file was on a device not fully mapped initially.
+                # Try a final lookup in the full block_devices list?
+                found_in_map = False
+                for dev_path_lookup, data in path_map.items():
+                     if dev_path_lookup == current_path:
+                          path_map[current_path] = data # Ensure it's there if somehow missed
+                          found_in_map = True
+                          break
+                if not found_in_map:
+                     print(f"  Path {current_path} truly not found, cannot trace further.")
+                     return None
+
 
             dev_info = path_map[current_path]["info"]
             dev_type = dev_info.get("type")
-            
+
             if dev_type == "disk":
                 print(f"  Found parent disk: {current_path}")
-                return current_path # Found the parent disk
+                return current_path
 
-            # Go to parent
             parent_path = path_map[current_path]["pkname"]
             if not parent_path:
-                 print(f"  Error: Path {current_path} has no parent (pkname).")
-                 # Might be the top-level disk already but type isn't 'disk'?
-                 if dev_type == "disk": return current_path 
-                 return None # Cannot trace further back
-            
+                 print(f"  Error: Path {current_path} (type: {dev_type}) has no parent (pkname).")
+                 # If it's a disk but type wasn't exactly 'disk', maybe return anyway?
+                 if dev_type and "disk" in dev_type.lower(): return current_path
+                 return None
+
             current_path = parent_path
-            
-        if current_path in visited:
-             print(f"  Error: Loop detected while tracing parent for {target_path}")
-        
-        print(f"  Error: Could not find parent disk for {target_path}")
+
+        if current_path in visited: print(f"  Error: Loop detected while tracing parent for {target_path}")
+        else: print(f"  Error: Could not find parent disk for {target_path}")
         return None
 
     def scan_for_disks(self, button):
@@ -283,14 +348,31 @@ class DiskPage(BaseConfigurationPage):
             print("--- Searching for live OS root mountpoint ('/') ---")
             root_source_path = None
             queue = list(all_block_devices)
+            processed_for_root = set() # Avoid reprocessing children
             while queue:
                  dev = queue.pop(0)
+                 dev_path = dev.get("path")
+                 if not dev_path or dev_path in processed_for_root: continue
+                 processed_for_root.add(dev_path)
+
+                 # Check current device
                  if dev.get("mountpoint") == "/":
-                      root_source_path = dev.get("path")
+                      root_source_path = dev_path
                       print(f"  Found root mountpoint '/' on device: {root_source_path}")
-                      break
+                      break # Found it
+
+                 # Check children
                  if "children" in dev:
-                      queue.extend(dev["children"])
+                      for child in dev["children"]:
+                            child_path = child.get("path")
+                            if child_path and child.get("mountpoint") == "/":
+                                 root_source_path = child_path
+                                 print(f"  Found root mountpoint '/' on child device: {root_source_path}")
+                                 break # Found it
+                            # Add grandchildren only if root not found yet
+                            if "children" in child and root_source_path is None:
+                                 queue.extend(child["children"])
+                 if root_source_path: break # Exit outer loop if found
 
             if root_source_path:
                  live_os_disk_path = self.find_physical_disk_for_path(root_source_path, all_block_devices)
@@ -397,8 +479,8 @@ class DiskPage(BaseConfigurationPage):
             
         if not found_usable_disk:
              # Optionally add a specific message if only host disks were found
-             print("Warning: Only disks currently used by the host OS were detected.")
-             # Consider adding a label to the UI group indicating this.
+             print("Warning: No usable disks detected (only Live OS disk found?).")
+             # Consider adding a visible label to the UI group
              
     def on_disk_toggled(self, check_button, disk_path):
         print(f"--- Toggle event for {disk_path} ---")
@@ -412,8 +494,9 @@ class DiskPage(BaseConfigurationPage):
                 self.selected_disks.discard(disk_path)
         else:
              print(f"  ROW NOT SENSITIVE (likely Live OS disk). Forcing checkbox inactive for {disk_path}.")
-             check_button.set_active(False)
-             
+             if check_button.get_active(): # Prevent state change if already inactive
+                  GLib.idle_add(check_button.set_active, False)
+
         self.update_complete_button_state()
 
     def on_partitioning_method_toggled(self, button):
@@ -463,7 +546,7 @@ class DiskPage(BaseConfigurationPage):
              if not self.scan_completed:
                  self.show_toast("Please scan for disks first.")
              elif len(self.selected_disks) == 0:
-                 self.show_toast("Please select at least one disk.")
+                 self.show_toast("Please select at least one usable disk.")
              elif self.partitioning_method is None:
                  self.show_toast("Please select a partitioning method.")
              else:
@@ -478,7 +561,8 @@ class DiskPage(BaseConfigurationPage):
         config_values = {
             "method": self.partitioning_method,
             "target_disks": sorted(list(self.selected_disks)), 
-            "commands": [] # Store generated commands here
+            "commands": [],
+            "partitions": []
         }
 
         if self.partitioning_method == "AUTOMATIC":
@@ -514,8 +598,7 @@ class DiskPage(BaseConfigurationPage):
                  
         elif self.partitioning_method == "MANUAL":
             print("  Manual Plan: (Not implemented - no commands generated)")
-            config_values["commands"] = []
-            config_values["partitions"] = []
+            # We should ideally detect existing partitions here if MANual was implemented
 
         # Show confirmation toast - COMMENTED OUT
         # if self.partitioning_method == \"AUTOMATIC\":
