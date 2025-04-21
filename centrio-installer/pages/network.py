@@ -51,35 +51,32 @@ class NetworkPage(BaseConfigurationPage):
         self.fetch_configured_data()
         
     def fetch_configured_data(self):
-        """Fetches the previously configured hostname from ConfigManager."""
-        print("Fetching configured hostname from ConfigManager...")
+        """Fetches the previously configured hostname from main window's final_config."""
+        print("Fetching configured hostname from main_window.final_config...")
         try:
-            network_config = self.main_window.config_manager.get_section('network')
+            # Access final_config directly on main_window
+            network_config = self.main_window.final_config.get('network', {}) 
             configured_hostname = network_config.get('hostname')
             
-            if configured_hostname: # Check if a valid hostname was retrieved
+            if configured_hostname:
                 print(f"Found configured hostname: {configured_hostname}")
                 self.hostname_row.set_text(configured_hostname)
             else:
                 print(f"No configured hostname found, using default: {self.default_hostname}")
-                # Ensure default is set if config is empty/None
                 self.hostname_row.set_text(self.default_hostname)
 
             self.hostname_row.set_sensitive(True)
             self.complete_button.set_sensitive(True)
             
         except Exception as e:
-            print(f"ERROR: Failed to get configured hostname from ConfigManager: {e}")
+            # Use AttributeError specifically? Or keep broad catch?
+            print(f"ERROR: Failed to get configured hostname from final_config: {e}")
             self.show_toast(f"Failed to retrieve configured hostname: {e}")
-            # Keep default, disable UI elements?
-            self.hostname_row.set_text(self.default_hostname) # Show the default
-            # Decide if disabling is appropriate here
-            # self.hostname_row.set_sensitive(False)
-            # self.complete_button.set_sensitive(False)
+            self.hostname_row.set_text(self.default_hostname) 
 
     # Renamed function to reflect action
     def save_settings_and_return(self, button): 
-        """Validates and saves the hostname to ConfigManager."""
+        """Validates hostname and calls mark_complete_and_return to save it."""
         hostname = self.hostname_row.get_text().strip()
         if not hostname:
              self.show_toast("Hostname cannot be empty.")
@@ -98,12 +95,11 @@ class NetworkPage(BaseConfigurationPage):
                   self.show_toast("Invalid hostname format. Use letters, numbers, hyphens. Max 63 chars.")
                   return
              
-        print(f"Saving hostname '{hostname}' to configuration...")
-        # No direct action here, just save to config
+        print(f"Confirming hostname '{hostname}'...")
         config_values = {"hostname": hostname}
-        # Update the config manager immediately
-        self.main_window.config_manager.update_section("network", config_values)
-        print("Hostname configuration saved.")
+        # Remove direct update - mark_complete_and_return handles storage via main_window.mark_config_complete
+        # self.main_window.config_manager.update_section("network", config_values)
+        # print("Hostname configuration saved.") 
         self.show_toast(f"Hostname '{hostname}' confirmed.")
         
         # Mark complete and return (passing saved values)
