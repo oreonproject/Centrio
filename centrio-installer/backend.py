@@ -166,17 +166,17 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
         else:
              print(f"Warning: Host D-Bus socket {host_dbus_socket} not found. Services inside chroot might fail.")
 
+        # Refactored structure: (name, source, target, fstype, options_list)
         mount_commands = [
-            ("proc",    "proc",                mount_points["proc"],                 ["-t", "proc", "nodev,noexec,nosuid"]), 
-            ("sysfs",   "sys",                 mount_points["sys"],                  ["-t", "sysfs", "nodev,noexec,nosuid"]), 
-            ("devtmpfs","udev",               mount_points["dev"],                  ["-t", "devtmpfs", "mode=0755,nosuid"]), 
-            ("devpts",  "devpts",              mount_points["dev/pts"],              ["-t", "devpts", "mode=0620,gid=5,nosuid,noexec"]), 
-            ("bind",    "/etc/resolv.conf",    mount_points["resolv.conf"],         ["--bind"]),
-            # Add D-Bus socket mount if host socket exists
-            ("bind",    host_dbus_socket,      mount_points["dbus"],               ["--bind"])
+            ("proc",    "proc",                mount_points["proc"],        "proc",    ["nodev","noexec","nosuid"]), 
+            ("sysfs",   "sys",                 mount_points["sys"],         "sysfs",   ["nodev","noexec","nosuid"]), 
+            ("devtmpfs","udev",               mount_points["dev"],         "devtmpfs",["mode=0755","nosuid"]), 
+            ("devpts",  "devpts",              mount_points["dev/pts"],     "devpts",  ["mode=0620","gid=5","nosuid","noexec"]), 
+            ("bind",    "/etc/resolv.conf",    mount_points["resolv.conf"], None,      ["--bind"]), # Special case: --bind is an option itself
+            ("bind",    host_dbus_socket,      mount_points["dbus"],        None,      ["--bind"])
         ]
 
-        for name, source, target, options in mount_commands:
+        for name, source, target, fstype, options_list in mount_commands:
             # Skip D-Bus mount if source doesn't exist
             if name == "bind" and source == host_dbus_socket and not os.path.exists(host_dbus_socket):
                  print(f"  Skipping D-Bus socket mount (source {host_dbus_socket} not found).")
@@ -184,18 +184,29 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
                  
             try:
                 # Ensure target dir exists for non-file bind mounts
-                if name != "bind" or source != host_dbus_socket:
+                if name != "bind" or source == "/etc/resolv.conf": # resolv.conf needs dir
                      os.makedirs(target, exist_ok=True)
-                # For the dbus socket bind mount, the target *file* path was created above
-                # We just need the directory for it.
+                # For the dbus socket bind mount
                 elif name == "bind" and source == host_dbus_socket:
                      os.makedirs(os.path.dirname(target), exist_ok=True)
                      # Create empty file as mount target if it doesn't exist? Bind mount needs a target.
                      if not os.path.exists(target):
                          open(target, 'a').close() 
                           
-                mount_cmd = ["mount"] + options + [source, target]
-                print(f"  Mounting {source} -> {target} ({name})")
+                # Construct mount command correctly
+                mount_cmd = ["mount"]
+                if fstype:
+                    mount_cmd.extend(["-t", fstype])
+                
+                # Handle options - differentiate between --bind and -o list
+                if "--bind" in options_list:
+                    mount_cmd.append("--bind")
+                elif options_list: # Only add -o if there are other options
+                    mount_cmd.extend(["-o", ",".join(options_list)])
+                    
+                mount_cmd.extend([source, target])
+                
+                print(f"  Mounting {source} -> {target} ({name}) with command: {' '.join(shlex.quote(c) for c in mount_cmd)}")
                 result = subprocess.run(mount_cmd, check=True, capture_output=True, text=True, timeout=15)
                 mounted_paths.add(target)
             except FileNotFoundError:
