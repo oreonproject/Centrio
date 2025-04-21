@@ -77,6 +77,10 @@ class ProgressPage(Gtk.Box):
         # Get mounted filesystems under the target path
         # Use findmnt to reliably get mount points in the correct order for unmounting (nested last)
         try:
+            # Ensure buffers are flushed before checking mounts
+            try: subprocess.run(["sync"], check=False, timeout=5) 
+            except Exception: pass
+            
             # -n: no header
             # -r: raw output
             # -o TARGET: only show target mount point
@@ -99,11 +103,17 @@ class ProgressPage(Gtk.Box):
                 print(f"    Unmounting {mp}...")
                 umount_cmd = ["umount", mp]
                 try:
+                    # Sync before trying to unmount
+                    try: subprocess.run(["sync"], check=False, timeout=5) 
+                    except Exception: pass
                     # Try normal unmount first
                     subprocess.run(umount_cmd, check=True, timeout=15, capture_output=True)
                     print(f"      Successfully unmounted {mp}")
                 except subprocess.CalledProcessError as e:
                     print(f"      Warning: Failed to unmount {mp}: {e.stderr.strip()}. Trying lazy unmount...")
+                    # Sync again before lazy unmount
+                    try: subprocess.run(["sync"], check=False, timeout=5) 
+                    except Exception: pass
                     # Fallback to lazy unmount
                     umount_lazy_cmd = ["umount", "-l", mp]
                     try:
@@ -116,6 +126,10 @@ class ProgressPage(Gtk.Box):
                 except Exception as e:
                      print(f"      Warning: Error unmounting {mp}: {e}")
                      
+            # Final sync after all attempts
+            try: subprocess.run(["sync"], check=False, timeout=5) 
+            except Exception: pass
+                    
         except FileNotFoundError:
             print("  Warning: 'findmnt' command not found. Cannot automatically unmount.")
         except subprocess.CalledProcessError as e:
@@ -184,6 +198,9 @@ class ProgressPage(Gtk.Box):
                 print(f"Warning: lsblk failed, proceeding with only {primary_disk}")
             
             try:
+                # Sync before checking lsof
+                try: subprocess.run(["sync"], check=False, timeout=5) 
+                except Exception: pass
                 # Check each mount point for active processes using lsof
                 print(f"Running lsof on paths: {list(mount_targets_to_check)} to check for busy resources...")
                 for path in sorted(list(mount_targets_to_check), reverse=True):
@@ -211,16 +228,22 @@ class ProgressPage(Gtk.Box):
                     print(f"    Unmounting {path}...")
                     umount_cmd = ["umount", path]
                     try:
+                        # Sync before unmount
+                        try: subprocess.run(["sync"], check=False, timeout=5) 
+                        except Exception: pass
                         result = subprocess.run(umount_cmd, check=True, timeout=10, capture_output=True, text=True)
                         print(f"      Successfully unmounted {path} (stdout: {result.stdout.strip()}, stderr: {result.stderr.strip()}) ")
-                        time.sleep(5) # Increased sleep to 5 seconds
+                        time.sleep(1) # Shorter sleep, sync is more important
                     except subprocess.CalledProcessError as e:
                         print(f"      Warning: Failed standard unmount {path} (rc={e.returncode}, stdout: {e.stdout.strip()}, stderr: {e.stderr.strip()}). Trying lazy unmount...")
+                        # Sync before lazy unmount
+                        try: subprocess.run(["sync"], check=False, timeout=5) 
+                        except Exception: pass
                         umount_lazy_cmd = ["umount", "-l", path]
                         try:
                             result_lazy = subprocess.run(umount_lazy_cmd, check=True, timeout=10, capture_output=True, text=True)
                             print(f"        Lazy unmount successful for {path} (stdout: {result_lazy.stdout.strip()}, stderr: {result_lazy.stderr.strip()}) ")
-                            time.sleep(5) # Increased sleep to 5 seconds
+                            time.sleep(1)
                         except Exception as lazy_e:
                             # Capture specific error for lazy unmount failure
                             lazy_err_msg = f"Failed to unmount {path} even with lazy option: {lazy_e}"
@@ -243,6 +266,9 @@ class ProgressPage(Gtk.Box):
             # Add explicit unmount attempt on the base device itself
             print(f"Attempting final unmount on base device {primary_disk}...")
             try:
+                 # Sync before final base unmount
+                 try: subprocess.run(["sync"], check=False, timeout=5) 
+                 except Exception: pass
                  subprocess.run(["umount", primary_disk], check=False, capture_output=True, text=True, timeout=10)
             except Exception as base_umount_e:
                  print(f"  Warning: Error during final base device umount: {base_umount_e}")
@@ -256,7 +282,7 @@ class ProgressPage(Gtk.Box):
                 partprobe_cmd = ["partprobe", primary_disk]
                 pp_success, pp_err, _ = backend._run_command(partprobe_cmd, f"Reread partitions on {primary_disk}", timeout=30)
                 if not pp_success: print(f"  Warning: partprobe failed: {pp_err}")
-                time.sleep(5) # Increased pause after partprobe
+                time.sleep(2) # Reduced pause after partprobe, rely on settle
             except Exception as pp_e: print(f"Warning: Error running partprobe: {pp_e}")
             
             # Add dmsetup remove
@@ -269,7 +295,7 @@ class ProgressPage(Gtk.Box):
             print("Running udevadm settle...")
             try:
                 # Run directly, might not need pkexec depending on context
-                subprocess.run(["udevadm", "settle"], check=False, timeout=30)
+                subprocess.run(["udevadm", "settle"], check=False, timeout=60) # Increased timeout
                 print("  Udev settle complete.")
             except FileNotFoundError:
                  print("Warning: udevadm not found, cannot settle udev queue.")
@@ -312,6 +338,9 @@ class ProgressPage(Gtk.Box):
                     except Exception: pass # Ignore lsblk failure here
                     
                     print(f"Running final lsof on paths: {list(final_device_paths_to_lsof)}...")
+                    # Sync before final lsof
+                    try: subprocess.run(["sync"], check=False, timeout=5) 
+                    except Exception: pass
                     for dev_path in final_device_paths_to_lsof:
                         lsof_cmd = ["lsof", dev_path]
                         lsof_success, lsof_err, lsof_stdout = backend._run_command(lsof_cmd, f"Final Check on {dev_path}", timeout=15)
@@ -326,15 +355,19 @@ class ProgressPage(Gtk.Box):
                         
                     if not lsof_found_processes: # Should always be False if we got here
                          print(f"  Final lsof checks passed for all paths.")
-                         print(f"Adding 5 second delay before executing {cmd_name}...")
-                         time.sleep(5)
+                         print(f"Adding 8 second delay before executing {cmd_name}...") # Increased delay
+                         try: subprocess.run(["sync"], check=False, timeout=5) # Sync before delay
+                         except Exception: pass
+                         time.sleep(8) # Increased from 5 to 8 seconds
+                         try: subprocess.run(["sync"], check=False, timeout=5) # Sync after delay
+                         except Exception: pass
                     else:
                          # This case should not be reached due to return above
                          return False 
                 
                 # --- Execute command --- 
                 self._update_progress_text(f"Running: {cmd_name}...", progress_fraction)
-                success, err, _ = backend._run_command(cmd_list, f"Storage Step: {cmd_name}", self._update_progress_text, timeout=60)
+                success, err, _ = backend._run_command(cmd_list, f"Storage Step: {cmd_name}", self._update_progress_text, timeout=120) # Increased timeout for mkfs/parted
                 if not success:
                     self.installation_error = err
                     # Should we restart udisks2 here on failure?

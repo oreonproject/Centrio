@@ -71,15 +71,20 @@ def _run_command(command_list, description, progress_callback=None, timeout=None
             print("--- Attempting to get last kernel messages (dmesg) ---")
             try:
                  # Run dmesg directly, not via _run_command to avoid loops/pkexec issues
-                 dmesg_cmd = ["dmesg"] # Request last few lines might be better
+                 # Get last 50 lines with timestamps
+                 dmesg_cmd = ["dmesg", "-T"] 
                  dmesg_process = subprocess.run(dmesg_cmd, capture_output=True, text=True, check=False, timeout=5)
                  if dmesg_process.stdout:
-                      last_lines = "\n".join(dmesg_process.stdout.strip().split('\n')[-20:]) # Get last 20 lines
-                      print(f"Last ~20 lines of dmesg:\n{last_lines}")
+                      # Use tail command for potentially large output (more reliable than split/slice)
+                      tail_process = subprocess.Popen(["tail", "-n", "50"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                      dmesg_tail_stdout, _ = tail_process.communicate(input=dmesg_process.stdout)
+                      print(f"Last 50 lines of dmesg:\n{dmesg_tail_stdout.strip()}")
                  else:
                       print("Could not capture dmesg output.")
                  if dmesg_process.stderr:
                       print(f"dmesg stderr: {dmesg_process.stderr.strip()}")
+            except FileNotFoundError:
+                 print("dmesg or tail command not found.")
             except Exception as dmesg_e:
                  print(f"Failed to run or capture dmesg: {dmesg_e}")
             print("-----------------------------------------------------")
@@ -210,16 +215,38 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
     finally:
         # --- Unmount everything in reverse order --- 
         print(f"Cleaning up chroot environment in {target_root}...")
+        # Sync before attempting unmounts
+        try: subprocess.run(["sync"], check=False, timeout=5) 
+        except Exception: pass
+        
         for target in sorted(list(mounted_paths), reverse=True):
             print(f"  Unmounting {target}...")
             umount_cmd = ["umount", target]
             try:
+                 # Sync before each unmount attempt
+                 try: subprocess.run(["sync"], check=False, timeout=5) 
+                 except Exception: pass
+                 
                  # Try normal unmount first
-                 subprocess.run(umount_cmd, check=False, capture_output=True, text=True, timeout=15) # Don't check=True here, might fail if busy
-                 # Try lazy unmount if normal failed? Might hide issues.
-                 # Let's not use lazy unmount here for now.
+                 subprocess.run(umount_cmd, check=True, capture_output=True, text=True, timeout=15) 
+                 print(f"    Successfully unmounted {target}")
+            except subprocess.CalledProcessError as e_norm:
+                 print(f"    Warning: Normal unmount failed for {target}: {e_norm.stderr.strip()}. Trying lazy unmount...")
+                 # Sync before lazy unmount
+                 try: subprocess.run(["sync"], check=False, timeout=5) 
+                 except Exception: pass
+                 umount_lazy_cmd = ["umount", "-l", target]
+                 try:
+                      subprocess.run(umount_lazy_cmd, check=True, capture_output=True, text=True, timeout=10)
+                      print(f"      Lazy unmount successful for {target}")
+                 except Exception as e_lazy:
+                      print(f"      Warning: Lazy unmount also failed for {target}: {e_lazy}")
             except Exception as e:
                  print(f"    Warning: Error during unmount of {target}: {e}")
+        
+        # Final sync
+        try: subprocess.run(["sync"], check=False, timeout=5) 
+        except Exception: pass
 
 # --- Configuration Functions ---
 
