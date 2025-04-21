@@ -134,8 +134,6 @@ class DiskPage(BaseConfigurationPage):
         self.scan_completed = False
         self.partitioning_method = None # "AUTOMATIC" or "MANUAL" or None
         self.disk_widgets = {} # Map path to row/check widgets
-        self.host_mounts = {} # Store host mount info
-        self.host_pvs = set()   # Store host LVM PV info
         
         # --- Add Initial Widgets --- 
         info_group = Adw.PreferencesGroup()
@@ -199,12 +197,59 @@ class DiskPage(BaseConfigurationPage):
         # No _connect_dbus needed anymore
         # self._connect_dbus() 
             
-    def connect_and_fetch_data(self):
-         # Data is fetched by scan_for_disks
-         pass 
+    def find_physical_disk_for_path(self, target_path, block_devices):
+        """Traces a given path back to its parent physical disk using lsblk data."""
+        print(f"--- Tracing physical disk for path: {target_path} ---")
+        if not block_devices or not target_path:
+            print("  Error: Missing block_devices or target_path.")
+            return None
+
+        # Create a mapping from any path to its device info and parent path (pkname)
+        path_map = {}
+        queue = list(block_devices)
+        while queue:
+            dev = queue.pop(0)
+            dev_path = dev.get("path")
+            if dev_path:
+                path_map[dev_path] = {"info": dev, "pkname": dev.get("pkname")}
+            if "children" in dev:
+                queue.extend(dev["children"])
+
+        # Trace upwards from the target_path
+        current_path = target_path
+        visited = set() # Prevent infinite loops in case of weird pkname links
+        while current_path and current_path not in visited:
+            visited.add(current_path)
+            print(f"  Tracing: current_path = {current_path}")
+            if current_path not in path_map:
+                print(f"  Error: Path {current_path} not found in lsblk map.")
+                return None # Path not found in lsblk output
+
+            dev_info = path_map[current_path]["info"]
+            dev_type = dev_info.get("type")
+            
+            if dev_type == "disk":
+                print(f"  Found parent disk: {current_path}")
+                return current_path # Found the parent disk
+
+            # Go to parent
+            parent_path = path_map[current_path]["pkname"]
+            if not parent_path:
+                 print(f"  Error: Path {current_path} has no parent (pkname).")
+                 # Might be the top-level disk already but type isn't 'disk'?
+                 if dev_type == "disk": return current_path 
+                 return None # Cannot trace further back
+            
+            current_path = parent_path
+            
+        if current_path in visited:
+             print(f"  Error: Loop detected while tracing parent for {target_path}")
+        
+        print(f"  Error: Could not find parent disk for {target_path}")
+        return None
 
     def scan_for_disks(self, button):
-        """Runs lsblk once, checks host usage based on JSON tree, and updates the UI."""
+        """Runs lsblk once, identifies the live OS disk, checks usage, and updates the UI."""
         print("Scanning for disks using lsblk...")
         button.set_sensitive(False)
         self.show_toast("Scanning for storage devices...")
@@ -223,99 +268,65 @@ class DiskPage(BaseConfigurationPage):
         self.auto_part_check.set_active(False)
         self.manual_part_check.set_active(False)
 
-        # --- Get Host Usage Info ---
-        self.host_mounts = get_host_mounts()
-        self.host_pvs = get_host_lvm_pvs()
-        # --- End Host Usage Info ---
-
         try:
-            # Run lsblk ONCE, get JSON tree, request partition parent (PKNAME)
-            cmd = ["lsblk", "-J", "-b", "-p", "-o", "NAME,PATH,SIZE,MODEL,TYPE,PKNAME"]
-            print(f"Running: {' '.join(cmd)}") # Log the command
+            # Run lsblk ONCE, get JSON tree, include MOUNTPOINT
+            cmd = ["lsblk", "-J", "-b", "-p", "-o", "NAME,PATH,SIZE,MODEL,TYPE,PKNAME,MOUNTPOINT"]
+            print(f"Running: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
             lsblk_data = json.loads(result.stdout)
             
             self.detected_disks = []
-            partition_info = {} # Store {part_path: parent_disk_path}
             all_block_devices = lsblk_data.get("blockdevices", [])
+            live_os_disk_path = None
 
-            # --- First pass: Extract all partitions and their parents ---
-            print("--- Parsing lsblk JSON for partitions and parents ---")
-            for device in all_block_devices:
-                # Recursively check children
-                children = device.get("children", [])
-                parent_path = device.get("path")
-                if parent_path and children:
-                     queue = children[:]
-                     while queue:
-                          child = queue.pop(0)
-                          child_path = child.get("path")
-                          child_type = child.get("type")
-                          # Use PKNAME if available and seems correct, otherwise use parent from tree search
-                          pkname = child.get("pkname")
-                          current_parent_path = pkname if (pkname and pkname in child_path) else parent_path
-                          
-                          if child_path and child_type == "part":
-                               partition_info[child_path] = current_parent_path
-                               print(f"  Found Partition: {child_path} -> Parent: {current_parent_path}")
-                          
-                          # Add grandchildren to queue if they exist
-                          grandchildren = child.get("children", [])
-                          if grandchildren:
-                               queue.extend(grandchildren)
-            print(f"--- Finished parsing partitions: {partition_info} ---")
+            # --- Find the physical disk hosting the live OS root ('/') ---
+            print("--- Searching for live OS root mountpoint ('/') ---")
+            root_source_path = None
+            queue = list(all_block_devices)
+            while queue:
+                 dev = queue.pop(0)
+                 if dev.get("mountpoint") == "/":
+                      root_source_path = dev.get("path")
+                      print(f"  Found root mountpoint '/' on device: {root_source_path}")
+                      break
+                 if "children" in dev:
+                      queue.extend(dev["children"])
 
-            # --- Identify host-used partitions ---
-            host_used_partitions = set(self.host_mounts.values()) | self.host_pvs
-            print(f"--- Host used partitions/PVs: {host_used_partitions} ---")
+            if root_source_path:
+                 live_os_disk_path = self.find_physical_disk_for_path(root_source_path, all_block_devices)
+                 if live_os_disk_path:
+                      print(f"--- Identified Live OS physical disk: {live_os_disk_path} ---")
+                 else:
+                      print("--- WARNING: Could not trace root mountpoint source back to a physical disk! ---")
+            else:
+                 print("--- WARNING: Could not find root mountpoint '/' in lsblk output! ---")
+            # --- Finished searching for live OS disk ---
 
-            # --- Second pass: Process disks and check usage ---
-            print("--- Processing disks and checking host usage ---")
+            # --- Process all detected physical disks ---
+            print("--- Processing detected disks ---")
             for device in all_block_devices:
                 if device.get("type") == "disk" and not any(s in (device.get("model") or "").upper() for s in ["CD", "DVD"]):
                     disk_path = device.get("path")
                     if not disk_path: continue
 
-                    is_host_disk = False
-                    print(f"--- Checking host usage for Disk: {disk_path} ---")
+                    # Mark disk as unusable only if it's the one hosting the live OS
+                    is_live_os_disk = (disk_path == live_os_disk_path)
+                    
+                    print(f"  Processing disk: {disk_path}, Is Live OS Disk? {is_live_os_disk}")
 
-                    # Check if disk itself is directly used (e.g., PV on whole disk)
-                    if disk_path in self.host_pvs or disk_path in self.host_mounts.values():
-                        print(f"  Disk {disk_path} is directly used by host (PV or mount source).")
-                        is_host_disk = True
-                    else:
-                        # Check if any partition belonging to this disk is used
-                        print(f"  Checking partitions belonging to {disk_path}...")
-                        found_used_partition = False
-                        for part_path, parent_disk in partition_info.items():
-                            if parent_disk == disk_path:
-                                print(f"    Found child partition: {part_path}")
-                                if part_path in host_used_partitions:
-                                    print(f"    Partition {part_path} IS used by host.")
-                                    is_host_disk = True
-                                    found_used_partition = True
-                                    break # Found a used partition, no need to check others for this disk
-                                else:
-                                     print(f"    Partition {part_path} is NOT used by host.")
-                        if not found_used_partition:
-                             print(f"  No partitions of {disk_path} found to be used by host.")
-
-
-                    print(f"!!! RESULT for {disk_path}: is_host_disk = {is_host_disk}")
                     disk_info = {
-                        "name": device.get("name", "N/A"), # Keep original name if needed elsewhere
+                        "name": device.get("name", "N/A"),
                         "path": disk_path,
                         "size": device.get("size"),
                         "model": device.get("model", "Unknown Model").strip(),
-                        "is_host_disk": is_host_disk
+                        "is_live_os_disk": is_live_os_disk # Changed flag name
                     }
                     self.detected_disks.append(disk_info)
 
-            print(f"Detected disks (including host usage check): {self.detected_disks}")
+            print(f"Detected disks list: {self.detected_disks}")
             self.update_disk_list_ui()
             self.scan_completed = True
             self.show_toast(f"Scan complete. Found {len(self.detected_disks)} disk(s).")
-            # Show groups now that scan is done
             if self.detected_disks:
                 self.disk_list_group.set_visible(True)
                 self.disk_list_box.set_visible(True)
@@ -345,7 +356,7 @@ class DiskPage(BaseConfigurationPage):
             self.update_complete_button_state()
             
     def update_disk_list_ui(self):
-        """Populates the disk list UI, marking host disks as unusable."""
+        """Populates the disk list UI, marking the live OS disk as unusable."""
         # Clear previous items
         while child := self.disk_list_box.get_row_at_index(0):
              self.disk_list_box.remove(child)
@@ -369,13 +380,11 @@ class DiskPage(BaseConfigurationPage):
             check = Gtk.CheckButton()
             check.set_valign(Gtk.Align.CENTER)
             
-            if disk["is_host_disk"]:
-                 # !!! DEBUG !!!
-                 print(f"!!! UI Update: Marking {disk['path']} as insensitive.")
-                 row.set_subtitle(subtitle + " (In use by host OS - Cannot select)")
-                 row.set_sensitive(False) # Disable the whole row
+            if disk["is_live_os_disk"]: 
+                 print(f"!!! UI Update: Marking {disk['path']} (Live OS Disk) as insensitive.")
+                 row.set_subtitle(subtitle + " (Live OS Disk - Cannot select)")
+                 row.set_sensitive(False) 
                  check.set_sensitive(False)
-                 # Do not connect signal or add to activatable widgets
             else:
                  found_usable_disk = True
                  check.connect("toggled", self.on_disk_toggled, disk_path)
@@ -392,23 +401,17 @@ class DiskPage(BaseConfigurationPage):
              # Consider adding a label to the UI group indicating this.
              
     def on_disk_toggled(self, check_button, disk_path):
-        # !!! DEBUG !!!
         print(f"--- Toggle event for {disk_path} ---")
-        is_sensitive = disk_path in self.disk_widgets and self.disk_widgets[disk_path]["row"].get_sensitive()
-        print(f"  Row sensitive? {is_sensitive}")
-        
-        if is_sensitive:
+        # Check sensitivity (which depends on is_live_os_disk flag)
+        if disk_path in self.disk_widgets and self.disk_widgets[disk_path]["row"].get_sensitive():
             if check_button.get_active():
-                # !!! DEBUG !!!
                 print(f"  Adding {disk_path} to selected_disks.")
                 self.selected_disks.add(disk_path)
             else:
-                # !!! DEBUG !!!
                 print(f"  Removing {disk_path} from selected_disks.")
                 self.selected_disks.discard(disk_path)
         else:
-             # !!! DEBUG !!!
-             print(f"  ROW NOT SENSITIVE. Forcing checkbox inactive for {disk_path}.")
+             print(f"  ROW NOT SENSITIVE (likely Live OS disk). Forcing checkbox inactive for {disk_path}.")
              check_button.set_active(False)
              
         self.update_complete_button_state()
@@ -428,30 +431,28 @@ class DiskPage(BaseConfigurationPage):
          self.update_complete_button_state()
 
     def update_complete_button_state(self):
-        # !!! DEBUG !!!
         print(f"--- Updating button state ---")
         print(f"  Selected disks BEFORE validation: {self.selected_disks}")
-        
+        # Validate against sensitivity (which reflects is_live_os_disk)
         valid_selected_disks = {d for d in self.selected_disks if d in self.disk_widgets and self.disk_widgets[d]["row"].get_sensitive()}
         if len(valid_selected_disks) != len(self.selected_disks):
-             print(f"  WARNING: Host disk found in selected_disks set. Correcting.")
-             self.selected_disks = valid_selected_disks # Correct the set
+             print(f"  WARNING: Live OS disk found in selected_disks set. Correcting.")
+             self.selected_disks = valid_selected_disks 
              
-        print(f"  Selected disks AFTER validation: {self.selected_disks}") # DEBUG
+        print(f"  Selected disks AFTER validation: {self.selected_disks}") 
         
         can_proceed = (
             self.scan_completed and 
-            len(self.selected_disks) > 0 and # Check the corrected set
+            len(self.selected_disks) > 0 and 
             self.partitioning_method is not None
         )
         print(f"  Scan completed: {self.scan_completed}") # DEBUG
         print(f"  Valid disks selected: {len(self.selected_disks) > 0}") # DEBUG
         print(f"  Method selected: {self.partitioning_method is not None}") # DEBUG
-        print(f"  Setting Confirm button sensitive: {can_proceed}") # DEBUG
+        print(f"  Setting Confirm button sensitive: {can_proceed}")
         self.complete_button.set_sensitive(can_proceed)
         
     def apply_settings_and_return(self, button):
-        # !!! DEBUG !!!
         print(f"--- Apply Settings START ---")
         print(f"  Selected disks at start: {self.selected_disks}")
         
@@ -470,7 +471,6 @@ class DiskPage(BaseConfigurationPage):
              return
 
         print(f"--- Confirming Storage Plan ---")
-        # !!! DEBUG !!!
         print(f"  Selected Disks before generating commands: {list(self.selected_disks)}")
         print(f"  Partitioning Method: {self.partitioning_method}")
         
@@ -482,13 +482,13 @@ class DiskPage(BaseConfigurationPage):
         }
 
         if self.partitioning_method == "AUTOMATIC":
-            # !!! DEBUG !!! Check again just before using
+            # Check again just before using
             if not self.selected_disks:
                  print("!!! ERROR: No disks selected in apply_settings_and_return despite button being sensitive!")
                  self.show_toast("Internal Error: No disk selected.")
                  return
             primary_disk = sorted(list(self.selected_disks))[0]
-            # !!! DEBUG !!! Check if primary_disk is sensitive (should be)
+            # Check if primary_disk is sensitive (should be)
             if primary_disk not in self.disk_widgets or not self.disk_widgets[primary_disk]["row"].get_sensitive():
                  print(f"!!! ERROR: Primary disk {primary_disk} is marked as unusable but was selected!")
                  self.show_toast(f"Internal Error: Cannot use disk {primary_disk}.")
@@ -497,35 +497,22 @@ class DiskPage(BaseConfigurationPage):
             print(f"  Generating AUTOMATIC partitioning commands for: {primary_disk}")
             
             # Generate the command lists
-            # Need to determine prefix for mkfs (e.g., 'p' for nvme)
             partition_prefix = "p" if "nvme" in primary_disk else ""
-            
             wipe_cmd = generate_wipefs_command(primary_disk)
             parted_cmds = generate_gpt_commands(primary_disk)
             mkfs_cmds = generate_mkfs_commands(primary_disk, partition_prefix)
-            
             all_commands = [wipe_cmd] + parted_cmds + mkfs_cmds
-            
-            # Add commands to the config_values
-            # Storing as list of lists for clarity
             config_values["commands"] = all_commands 
-            
-            # Optionally, add details about the created partitions/mounts
-            # This assumes the layout from generate_gpt_commands
             part1_suffix = f"{partition_prefix}1"
             part2_suffix = f"{partition_prefix}2"
             config_values["partitions"] = [
                 {"device": f"{primary_disk}{part1_suffix}", "mountpoint": "/boot/efi", "fstype": "vfat"},
                 {"device": f"{primary_disk}{part2_suffix}", "mountpoint": "/", "fstype": "ext4"}
             ]
-            
-            print(f"  Generated {len(all_commands)} commands for automatic partitioning.")
-            # Example: print the first command
             if all_commands:
                  print(f"    Example command: {' '.join(shlex.quote(c) for c in all_commands[0])}")
                  
         elif self.partitioning_method == "MANUAL":
-            # Manual partitioning commands would be generated here if implemented
             print("  Manual Plan: (Not implemented - no commands generated)")
             config_values["commands"] = []
             config_values["partitions"] = []
