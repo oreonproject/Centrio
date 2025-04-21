@@ -172,10 +172,24 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
         # --- End Debugging --- 
         if not os.path.exists(resolv_conf_target):
             try:
-                 print(f"  Creating empty file {resolv_conf_target} for bind mount...")
-                 # Use 'w' to create if it doesn't exist, then close immediately.
-                 open(resolv_conf_target, 'w').close()
-                 # Optionally set permissions? Might not be necessary.
+                 # --- Add MORE Debugging --- 
+                 print(f"  DEBUG: Re-checking existence of directory {resolv_conf_dir} right before open...")
+                 if os.path.exists(resolv_conf_dir):
+                     print(f"  DEBUG: Directory {resolv_conf_dir} exists.")
+                     try:
+                         stat_info = os.stat(resolv_conf_dir)
+                         print(f"  DEBUG: Directory permissions: {stat_info.st_mode:o}")
+                         ls_cmd = ["ls", "-ld", resolv_conf_dir]
+                         ls_result = subprocess.run(ls_cmd, capture_output=True, text=True, check=False, timeout=5)
+                         print(f"  DEBUG: ls -ld {resolv_conf_dir}:\n{ls_result.stdout.strip()}\n{ls_result.stderr.strip()}")
+                     except Exception as stat_e:
+                         print(f"  DEBUG: Error getting stat/ls for {resolv_conf_dir}: {stat_e}")
+                 else:
+                     print(f"  DEBUG: Directory {resolv_conf_dir} DOES NOT EXIST right before open!")
+                 # --- End MORE Debugging --- 
+                  print(f"  Creating empty file {resolv_conf_target} for bind mount...")
+                  # Use 'w' to create if it doesn't exist, then close immediately.
+                  open(resolv_conf_target, 'w').close()
             except OSError as e:
                  raise RuntimeError(f"Failed to create target file {resolv_conf_target}: {e}") from e
                  
