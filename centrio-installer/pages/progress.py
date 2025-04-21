@@ -94,18 +94,20 @@ class ProgressPage(Gtk.Box):
                      continue
                      
                 print(f"    Unmounting {mp}...")
-                # Use lazy unmount? (-l) Might hide issues but prevent blocking.
-                # Or force? (-f) Can be dangerous.
-                # Try normal unmount first.
                 umount_cmd = ["umount", mp]
                 try:
+                    # Try normal unmount first
                     subprocess.run(umount_cmd, check=True, timeout=15, capture_output=True)
                     print(f"      Successfully unmounted {mp}")
                 except subprocess.CalledProcessError as e:
-                    print(f"      Warning: Failed to unmount {mp}: {e.stderr.strip()}")
-                    # Consider trying lazy unmount as fallback?
-                    # umount_lazy_cmd = ["umount", "-l", mp]
-                    # try: ... except: ...
+                    print(f"      Warning: Failed to unmount {mp}: {e.stderr.strip()}. Trying lazy unmount...")
+                    # Fallback to lazy unmount
+                    umount_lazy_cmd = ["umount", "-l", mp]
+                    try:
+                        subprocess.run(umount_lazy_cmd, check=True, timeout=5, capture_output=True)
+                        print(f"        Lazy unmount successful for {mp}")
+                    except Exception as lazy_e:
+                        print(f"        Warning: Lazy unmount also failed for {mp}: {lazy_e}")
                 except subprocess.TimeoutExpired:
                      print(f"      Warning: Timeout unmounting {mp}")
                 except Exception as e:
@@ -119,79 +121,136 @@ class ProgressPage(Gtk.Box):
             print(f"  Warning: Error listing mounts: {e}. Cannot automatically unmount.")
 
     def _execute_storage_setup(self, disk_config):
-        """Executes partitioning, formatting, and mounting commands."""
+        """Executes partitioning/formatting/mounting OR just mounting for manual."""
+        self.disk_config = disk_config # Store for potential unmount later
+        method = disk_config.get("method")
         commands = disk_config.get("commands", [])
         partitions = disk_config.get("partitions", [])
-        method = disk_config.get("method")
+        target_disks = disk_config.get("target_disks", [])
 
-        if not commands or method != "AUTOMATIC":
-            print(f"Skipping storage setup: No commands generated or method is {method}.")
-            # If manual was selected and had no commands, this is expected.
-            # If automatic failed to generate commands, that's an error handled earlier.
-            return True # Treat as success for now
-        
-        self._update_progress_text("Preparing storage devices...", 0.05)
-        
-        # --- Execute Partitioning/Formatting Commands ---
-        for i, cmd_list in enumerate(commands):
-            cmd_name = cmd_list[0]
-            progress_fraction = 0.1 + (0.15 * (i / len(commands))) # Allocate ~15% progress
-            # Use the backend runner
-            success, err = backend._run_command(cmd_list, f"Storage Step: {cmd_name}", self._update_progress_text, timeout=60)
-            if not success:
-                self.installation_error = err
+        # --- Pre-emptive Unmount (Needed for Automatic) ---
+        if method == "AUTOMATIC" and target_disks:
+            primary_disk = target_disks[0] 
+            self._update_progress_text(f"Checking existing mounts on {primary_disk}...", 0.01)
+            print(f"Attempting pre-emptive unmount of partitions on {primary_disk}...")
+            try:
+                lsblk_cmd = ["lsblk", "-n", "-o", "PATH", "--raw", primary_disk]
+                result = subprocess.run(lsblk_cmd, capture_output=True, text=True, check=False, timeout=10) # Allow lsblk failure
+                if result.returncode == 0:
+                    existing_paths = [line.strip() for line in result.stdout.split('\n') if line.strip() and line.strip() != primary_disk]
+                    mounts_found = False
+                    for path in existing_paths:
+                        # Double-check with os.path.ismount
+                        try:
+                             if os.path.ismount(path):
+                                 mounts_found = True
+                                 print(f"  Found mounted partition {path}, attempting umount...")
+                                 umount_cmd = ["umount", path]
+                                 try:
+                                     # Try normal unmount first, enforce check
+                                     subprocess.run(umount_cmd, check=True, timeout=5, capture_output=True, text=True)
+                                     print(f"    Successfully unmounted {path}")
+                                     time.sleep(1) # Brief pause after successful umount
+                                 except subprocess.CalledProcessError as e:
+                                     print(f"    Warning: Failed to unmount {path}: {e.stderr.strip()}. Trying lazy unmount...")
+                                     # Fallback to lazy unmount
+                                     umount_lazy_cmd = ["umount", "-l", path]
+                                     try:
+                                         subprocess.run(umount_lazy_cmd, check=True, timeout=5, capture_output=True, text=True)
+                                         print(f"      Lazy unmount successful for {path}")
+                                         time.sleep(1) # Brief pause after successful lazy umount
+                                     except Exception as lazy_e:
+                                         err_msg = f"Failed to unmount {path} even with lazy option: {lazy_e}"
+                                         print(f"      ERROR: {err_msg}")
+                                         self.installation_error = err_msg
+                                         return False # Fatal error if lazy unmount fails
+                        except Exception as mount_check_e:
+                             print(f"Warning: Error checking mount status for {path}: {mount_check_e}")
+                             
+                    if not mounts_found:
+                        print(f"  No active mounts found on {primary_disk}.")
+                else:
+                    print(f"Warning: lsblk failed for {primary_disk} (rc={result.returncode}), cannot reliably check for mounts. Proceeding cautiously.")
+
+            except Exception as e:
+                # Log error but proceed cautiously, might still work if no mounts exist
+                print(f"Warning: Error during pre-emptive check/unmount: {e}")
+                
+            self._update_progress_text("Pre-mount check complete.", 0.02)
+            
+        # --- Execute Main Storage Actions ---
+        if method == "AUTOMATIC":
+            if not commands:
+                self.installation_error = "Automatic partitioning selected, but no commands were generated."
                 return False
                 
-        self._update_progress_text("Partitioning and formatting complete.", 0.25)
-        
-        # --- Mount Filesystems ---
+            self._update_progress_text("Preparing storage devices...", 0.05)
+            # Execute Partitioning/Formatting Commands
+            for i, cmd_list in enumerate(commands):
+                cmd_name = cmd_list[0]
+                progress_fraction = 0.1 + (0.15 * (i / len(commands)))
+                # Use the backend runner (handles pkexec)
+                success, err, _ = backend._run_command(cmd_list, f"Storage Step: {cmd_name}", self._update_progress_text, timeout=60)
+                if not success:
+                    self.installation_error = err
+                    return False
+            self._update_progress_text("Partitioning and formatting complete.", 0.25)
+            
+        elif method == "MANUAL":
+            print("Manual partitioning selected. Skipping wipefs/parted/mkfs commands.")
+            self._update_progress_text("Using existing partitions...", 0.25)
+            # Partitions should have been detected by DiskPage and passed in disk_config
+            if not partitions:
+                 self.installation_error = "Manual partitioning selected, but no partitions were detected or passed."
+                 return False
+        else:
+            self.installation_error = f"Invalid or missing partitioning method: {method}"
+            return False
+            
+        # --- Mount Filesystems (Common to Automatic & Manual) ---
         if not partitions:
-            print("Warning: No partition details found in config, cannot mount.")
-            # This might be okay if manual partitioning was intended to be handled differently
-            return True
+            # This check is somewhat redundant now but safe
+            self.installation_error = f"No partition details found in config for {method} method, cannot mount."
+            return False
             
         self._update_progress_text("Mounting filesystems...", 0.3)
         try:
-            # Ensure root mount point exists
             os.makedirs(self.target_root, exist_ok=True)
         except OSError as e:
             self.installation_error = f"Failed to create root mount point {self.target_root}: {e}"
-            print(f"ERROR: {self.installation_error}")
             return False
             
-        # Mount in order (usually ESP then /)
         mount_progress_start = 0.3
         mount_progress_end = 0.35
-        for i, part_info in enumerate(partitions):
+        sorted_partitions = sorted(partitions, key=lambda p: 0 if p.get("mountpoint") == "/boot/efi" else (1 if p.get("mountpoint") == "/" else 2))
+        
+        for i, part_info in enumerate(sorted_partitions):
             device = part_info.get("device")
             mountpoint = part_info.get("mountpoint")
-            # fstype = part_info.get("fstype") # Not needed for mount command
-            
-            if not device or not mountpoint:
-                print(f"Warning: Skipping mount for incomplete partition info: {part_info}")
-                continue
-                
-            # Create the specific mount point under the target root
+            if not device or not mountpoint: continue
             full_mount_path = os.path.join(self.target_root, mountpoint.lstrip('/'))
-            progress_fraction = mount_progress_start + (mount_progress_end - mount_progress_start) * (i / len(partitions))
+            progress_fraction = mount_progress_start + (mount_progress_end - mount_progress_start) * (i / len(sorted_partitions))
             self._update_progress_text(f"Creating mount point {full_mount_path}...", progress_fraction)
             try:
                  os.makedirs(full_mount_path, exist_ok=True)
             except OSError as e:
                  self.installation_error = f"Failed to create mount point {full_mount_path}: {e}"
-                 print(f"ERROR: {self.installation_error}")
                  return False
 
-            # Build mount command
             mount_cmd = ["mount", device, full_mount_path]
-            # Add fstype if specified (optional for mount command, but good practice)
-            # if fstype:
-            #    mount_cmd.extend(["-t", fstype])
-            
-            self._update_progress_text(f"Mounting {device} at {full_mount_path}...", progress_fraction)
-            success, err = backend._run_command(mount_cmd, f"Mount {device}", self._update_progress_text, timeout=15)
+            # Run mount directly on host (assuming root)
+            try:
+                 print(f"Running on host: Mount {device} -> {' '.join(shlex.quote(c) for c in mount_cmd)}")
+                 result = subprocess.run(mount_cmd, capture_output=True, text=True, check=True, timeout=15)
+                 success = True
+            except Exception as e:
+                 # Simplified error handling for brevity
+                 self.installation_error = f"Failed to mount {device}: {e}"
+                 success = False
+                 
             if not success:
-                self.installation_error = err
+                # Attempt to unmount already mounted things before failing fully?
+                self._attempt_unmount() 
                 return False
 
         self._update_progress_text("Filesystems mounted successfully.", mount_progress_end)

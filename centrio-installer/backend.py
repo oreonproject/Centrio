@@ -48,16 +48,16 @@ def _run_command(command_list, description, progress_callback=None, timeout=None
             else:
                 error_msg = f"{description} failed: {error_detail}"
             print(f"ERROR: {error_msg}")
-            return False, error_msg
+            return False, error_msg, None
             
         print(f"SUCCESS: {description} completed.")
-        return True, ""
+        return True, "", stdout.strip()
 
     except FileNotFoundError:
         # This likely means pkexec itself wasn't found
         err = "Command not found: pkexec. Cannot run privileged commands."
         print(f"ERROR: {err}")
-        return False, err
+        return False, err, None
     except subprocess.TimeoutExpired:
         err = f"Timeout expired after {timeout}s for {description} (via pkexec)."
         # Try to kill the process if it timed out during communicate
@@ -66,13 +66,13 @@ def _run_command(command_list, description, progress_callback=None, timeout=None
             process.wait() # Wait for the process to terminate
         except Exception as kill_e:
             print(f"Warning: Error trying to kill timed out pkexec process: {kill_e}")
-        return False, err
+        return False, err, None
     except Exception as e:
         # Include stderr if available, otherwise just the exception
         err_detail = stderr_output.strip() or str(e)
         err = f"Unexpected error during {description} (via pkexec): {err_detail}"
         print(f"ERROR: {err}")
-        return False, err
+        return False, err, None
 
 def _run_in_container(target_root, command_list, description, progress_callback=None, timeout=None, pipe_input=None):
     """Runs a command inside the target root using systemd-nspawn (via pkexec)."""
@@ -99,7 +99,7 @@ def configure_system_in_container(target_root, config_data, progress_callback=No
     # Timezone
     tz = config_data.get('timedate', {}).get('timezone')
     if tz:
-        success, err = _run_in_container(target_root, ["timedatectl", "set-timezone", tz], "Set Timezone", progress_callback, timeout=15)
+        success, err, _ = _run_in_container(target_root, ["timedatectl", "set-timezone", tz], "Set Timezone", progress_callback, timeout=15)
         if not success: return False, err
     else:
         print("Skipping timezone configuration (not provided).")
@@ -107,7 +107,7 @@ def configure_system_in_container(target_root, config_data, progress_callback=No
     # Locale
     locale = config_data.get('language', {}).get('locale')
     if locale:
-        success, err = _run_in_container(target_root, ["localectl", "set-locale", f"LANG={locale}"], "Set Locale", progress_callback, timeout=15)
+        success, err, _ = _run_in_container(target_root, ["localectl", "set-locale", f"LANG={locale}"], "Set Locale", progress_callback, timeout=15)
         if not success: return False, err
     else:
          print("Skipping locale configuration (not provided).")
@@ -115,7 +115,7 @@ def configure_system_in_container(target_root, config_data, progress_callback=No
     # Keymap
     keymap = config_data.get('keyboard', {}).get('layout')
     if keymap:
-        success, err = _run_in_container(target_root, ["localectl", "set-keymap", keymap], "Set Keymap", progress_callback, timeout=15)
+        success, err, _ = _run_in_container(target_root, ["localectl", "set-keymap", keymap], "Set Keymap", progress_callback, timeout=15)
         if not success: return False, err
     else:
         print("Skipping keymap configuration (not provided).")
@@ -123,7 +123,7 @@ def configure_system_in_container(target_root, config_data, progress_callback=No
     # Hostname
     hostname = config_data.get('network', {}).get('hostname')
     if hostname:
-        success, err = _run_in_container(target_root, ["hostnamectl", "set-hostname", hostname], "Set Hostname", progress_callback, timeout=15)
+        success, err, _ = _run_in_container(target_root, ["hostnamectl", "set-hostname", hostname], "Set Hostname", progress_callback, timeout=15)
         if not success: return False, err
     else:
         print("Skipping hostname configuration (not provided).")
@@ -138,10 +138,10 @@ def create_user_in_container(target_root, user_config, progress_callback=None):
     real_name = user_config.get('real_name', '') 
     
     if not username:
-        return False, "Username not provided in user configuration."
+        return False, "Username not provided in user configuration.", None
     # Allow proceeding even if password is None or empty, chpasswd might handle it or fail later
     # if not password:
-    #      return False, "Password not provided for user creation."
+    #      return False, "Password not provided for user creation.", None
 
     # Build useradd command
     useradd_cmd = ["useradd", "-m", "-s", "/bin/bash", "-U"]
@@ -151,22 +151,22 @@ def create_user_in_container(target_root, user_config, progress_callback=None):
         useradd_cmd.extend(["-G", "wheel"]) # Add to wheel group for sudo
     useradd_cmd.append(username)
     
-    success, err = _run_in_container(target_root, useradd_cmd, f"Create User {username}", progress_callback, timeout=30)
-    if not success: return False, err
+    success, err, _ = _run_in_container(target_root, useradd_cmd, f"Create User {username}", progress_callback, timeout=30)
+    if not success: return False, err, None
     
     # Set password using chpasswd - only if password was provided
     if password is not None: # Check if password exists (even if empty string, let chpasswd decide)
         chpasswd_input = f"{username}:{password}"
-        success, err = _run_in_container(target_root, ["chpasswd"], f"Set Password for {username}", progress_callback, timeout=15, pipe_input=chpasswd_input)
+        success, err, _ = _run_in_container(target_root, ["chpasswd"], f"Set Password for {username}", progress_callback, timeout=15, pipe_input=chpasswd_input)
         if not success: 
             print(f"Warning: Failed to set password for {username} after user creation: {err}")
             # Decide if this should be a fatal error for the whole installation
-            # return False, err # Stop installation if password set fails?
+            # return False, err, None # Stop installation if password set fails?
             pass # Continue for now
     else:
          print(f"Warning: No password provided for user {username}. Account created without password set.")
         
-    return True, ""
+    return True, "", None
 
 # --- Package Installation ---
 
@@ -200,18 +200,18 @@ def install_packages_dnf(target_root, progress_callback=None):
         f"--setopt=install_weak_deps=False"
     ] + packages
 
-    success, err = _run_command(dnf_cmd, "Install Base Packages (DNF)", progress_callback, timeout=3600) # Increase timeout to 1 hour
-    if not success: return False, err
+    success, err, _ = _run_command(dnf_cmd, "Install Base Packages (DNF)", progress_callback, timeout=3600) # Increase timeout to 1 hour
+    if not success: return False, err, None
     
     # Optionally, enable NetworkManager service in the installed system
     nm_enable_cmd = ["systemctl", "enable", "NetworkManager.service"]
-    success, err = _run_in_container(target_root, nm_enable_cmd, "Enable NetworkManager Service", progress_callback, timeout=30)
+    success, err, _ = _run_in_container(target_root, nm_enable_cmd, "Enable NetworkManager Service", progress_callback, timeout=30)
     if not success: 
         print(f"Warning: Failed to enable NetworkManager service: {err}")
         # Continue installation even if service enabling fails?
         pass 
 
-    return True, ""
+    return True, "", None
 
 # --- Bootloader Installation ---
 
@@ -243,13 +243,13 @@ def install_bootloader_in_container(target_root, primary_disk, progress_callback
             grub_target_disk # Install to the disk MBR/boot sector
         ]
 
-    success, err = _run_in_container(target_root, grub_install_cmd, "Install GRUB", progress_callback, timeout=120)
-    if not success: return False, err
+    success, err, _ = _run_in_container(target_root, grub_install_cmd, "Install GRUB", progress_callback, timeout=120)
+    if not success: return False, err, None
     
     # Generate GRUB config
     # Ensure /boot is mounted correctly within the container context
     grub_mkconfig_cmd = ["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"]
-    success, err = _run_in_container(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
-    if not success: return False, err
+    success, err, _ = _run_in_container(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
+    if not success: return False, err, None
 
-    return True, "" 
+    return True, "", None 
