@@ -152,8 +152,24 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
                  os.makedirs(resolv_conf_dir, exist_ok=True)
              except OSError as e:
                  raise RuntimeError(f"Failed to create target directory {resolv_conf_dir}: {e}") from e
+             # --- Add Debugging --- 
+             print(f"  DEBUG: Checking existence of directory {resolv_conf_dir} after makedirs...")
+             if os.path.exists(resolv_conf_dir):
+                 print(f"  DEBUG: Directory {resolv_conf_dir} confirmed to exist.")
+                 print("  DEBUG: Running sync...")
+                 try: subprocess.run(["sync"], check=False, timeout=5)
+                 except Exception as sync_e: print(f"  DEBUG: Sync failed: {sync_e}")
+             else:
+                 print(f"  DEBUG: Directory {resolv_conf_dir} DOES NOT EXIST after makedirs!")
                  
         # Ensure target /etc/resolv.conf file exists for bind mount
+        # --- Add Debugging --- 
+        print(f"  DEBUG: Checking existence of file {resolv_conf_target} before open()...")
+        if os.path.exists(resolv_conf_target):
+            print(f"  DEBUG: File {resolv_conf_target} already exists.")
+        else:
+            print(f"  DEBUG: File {resolv_conf_target} does not exist yet.")
+        # --- End Debugging --- 
         if not os.path.exists(resolv_conf_target):
             try:
                  print(f"  Creating empty file {resolv_conf_target} for bind mount...")
