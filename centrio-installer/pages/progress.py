@@ -366,6 +366,9 @@ class ProgressPage(Gtk.Box):
                          return False 
                 
                 # --- Execute command --- 
+                quoted_cmd = ' '.join(shlex.quote(c) for c in cmd_list)
+                print(f"--- ABOUT TO EXECUTE STORAGE COMMAND: {quoted_cmd} ---")
+                
                 self._update_progress_text(f"Running: {cmd_name}...", progress_fraction)
                 success, err, _ = backend._run_command(cmd_list, f"Storage Step: {cmd_name}", self._update_progress_text, timeout=120) # Increased timeout for mkfs/parted
                 if not success:

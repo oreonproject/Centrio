@@ -667,34 +667,32 @@ def _deactivate_lvm_on_disk(disk_device, progress_callback=None):
 # --- Device Mapper Removal Helper --- 
 def _remove_dm_mappings(disk_device, progress_callback=None):
     """Attempts to remove device-mapper mappings associated with a disk."""
-    # Note: This is aggressive and might remove mappings needed by other disks
-    # if they are cryptically named. Use with caution.
-    # A safer approach would involve parsing lsblk --nodeps -o KNAME,PKNAME 
-    # and targeting specific mappers, but let's try the simpler approach first.
-    print(f"Attempting to remove any lingering device-mapper mappings related to {disk_device}...")
+    # Note: This was previously using dmsetup remove_all --force, which is risky
+    # and might interfere with the host system. Disabling for now.
+    # A safer approach would involve identifying specific mappings related 
+    # only to the target disk based on 'lsblk' or 'dmsetup ls --tree'.
+    print(f"Skipping removal of device-mapper mappings for {disk_device} (previously used remove_all).")
     if progress_callback:
-        progress_callback(f"Checking device-mapper on {disk_device}...", None)
+        progress_callback(f"Skipping DM mapping removal for {disk_device}.", None)
     
-    # We might not know the exact mapper names. Let's try removing all.
-    # This could be dangerous if unrelated mappings exist.
-    # A slightly safer bet is to list and then remove, but let's try remove_all first.
-    # Use --force to try harder.
-    dmsetup_cmd = ["dmsetup", "remove_all", "--force"]
+    # # --- Original Risky Code ---
+    # print(f"Attempting to remove any lingering device-mapper mappings related to {disk_device}...")
+    # if progress_callback:
+    #     progress_callback(f"Checking device-mapper on {disk_device}...", None)
     
-    # We specifically want to run this command *without* trying to check PVs/VGs on the disk first,
-    # as the goal is to clear potential locks preventing those checks.
-    # It might fail harmlessly if no mappings exist.
-    success, err, stdout = _run_command(dmsetup_cmd, f"Remove all device-mapper mappings (force)")
+    # dmsetup_cmd = ["dmsetup", "remove_all", "--force"]
+    # success, err, stdout = _run_command(dmsetup_cmd, f"Remove all device-mapper mappings (force)")
     
-    if not success:
-         # Ignore common errors like 'No devices found' or if the command fails to find relevant mappings
-         if "No devices found" in err or "not found" in err or "not found" in stdout:
-             print(f"  No active device-mapper mappings found or removed.")
-             return True, "" # Not an error
-         else:
-             print(f"  Warning: 'dmsetup remove_all --force' failed: {err} {stdout}")
-             # Don't make this fatal, as it's a best-effort cleanup
-             return True, f"Warning during dmsetup remove_all: {err}" # Return success but pass warning
-    else:
-        print(f"  Successfully ran 'dmsetup remove_all --force'. Output: {stdout}")
-        return True, "" 
+    # if not success:
+    #      if "No devices found" in err or "not found" in err or "not found" in stdout:
+    #          print(f"  No active device-mapper mappings found or removed.")
+    #          return True, "" # Not an error
+    #      else:
+    #          print(f"  Warning: 'dmsetup remove_all --force' failed: {err} {stdout}")
+    #          return True, f"Warning during dmsetup remove_all: {err}" # Return success but pass warning
+    # else:
+    #     print(f"  Successfully ran 'dmsetup remove_all --force'. Output: {stdout}")
+    #     return True, "" 
+    # # --- End Original Risky Code ---
+    
+    return True, "Skipped potentially risky dmsetup remove_all." # Return success, indicate skip 
