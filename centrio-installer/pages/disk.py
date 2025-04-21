@@ -239,40 +239,55 @@ class DiskPage(BaseConfigurationPage):
             
             # Helper to check if a device or its partitions are used by the host
             def is_device_used_by_host(device_path):
+                 print(f"--- Checking host usage for {device_path} ---") # DEBUG
+                 print(f"  Host PVs: {self.host_pvs}") # DEBUG
+                 print(f"  Host Mount Sources: {list(self.host_mounts.values())}") # DEBUG
+                 
                  # Check if device itself is a host LVM PV
-                 if device_path in self.host_pvs:
-                      print(f"  Device {device_path} is a host LVM PV.")
+                 is_pv = device_path in self.host_pvs
+                 print(f"  Is {device_path} a PV? {is_pv}") # DEBUG
+                 if is_pv:
                       return True
+                      
                  # Check if device itself is a source for a host mount
-                 if device_path in self.host_mounts.values():
-                      print(f"  Device {device_path} is directly mounted by host.")
+                 is_mount_source = device_path in self.host_mounts.values()
+                 print(f"  Is {device_path} a mount source? {is_mount_source}") # DEBUG
+                 if is_mount_source:
                       return True
                       
                  # Check partitions of the device
+                 print(f"  Checking partitions of {device_path}...") # DEBUG
                  try:
-                     # Run lsblk again just for this device's children
                      part_cmd = ["lsblk", "-J", "-b", "-p", "-o", "PATH,TYPE", device_path]
                      part_result = subprocess.run(part_cmd, capture_output=True, text=True, check=False, timeout=5)
                      if part_result.returncode == 0:
                          part_data = json.loads(part_result.stdout)
                          if "blockdevices" in part_data and len(part_data["blockdevices"]) > 0:
-                              # Check children recursively (usually just one level needed for partitions)
                               children = part_data["blockdevices"][0].get("children", [])
+                              print(f"    Partitions found: {[c.get('path') for c in children]}") # DEBUG
                               for child in children:
                                    child_path = child.get("path")
                                    if not child_path: continue
+                                   print(f"    Checking partition {child_path}...") # DEBUG
                                    # Check if partition is a host LVM PV
-                                   if child_path in self.host_pvs:
-                                        print(f"  Partition {child_path} is a host LVM PV.")
+                                   is_child_pv = child_path in self.host_pvs
+                                   print(f"      Is {child_path} a PV? {is_child_pv}") # DEBUG
+                                   if is_child_pv:
                                         return True
                                    # Check if partition is a source for a host mount
-                                   if child_path in self.host_mounts.values():
-                                        print(f"  Partition {child_path} is mounted by host.")
+                                   is_child_mount_source = child_path in self.host_mounts.values()
+                                   print(f"      Is {child_path} a mount source? {is_child_mount_source}") # DEBUG
+                                   if is_child_mount_source:
                                         return True
+                         else:
+                              print(f"    No partitions found via lsblk for {device_path}.") # DEBUG
+                     else:
+                          print(f"    lsblk failed for partitions of {device_path} (rc={part_result.returncode})") # DEBUG
                  except Exception as e:
                       print(f"  Warning: Failed to check partitions of {device_path} for host usage: {e}")
                       
-                 return False # Not found in mounts or PVs
+                 print(f"--- Finished checking {device_path}, determined NOT used by host. ---") # DEBUG
+                 return False 
 
             if "blockdevices" in lsblk_data:
                 for device in lsblk_data["blockdevices"]:
@@ -282,6 +297,8 @@ class DiskPage(BaseConfigurationPage):
                         if not disk_path: continue # Skip if no path
 
                         is_host_disk = is_device_used_by_host(disk_path)
+                        # !!! DEBUG !!!
+                        print(f"!!! RESULT for {disk_path}: is_host_disk = {is_host_disk}") 
                         
                         disk_info = {
                             "name": device.get("name", "N/A"),
@@ -352,6 +369,8 @@ class DiskPage(BaseConfigurationPage):
             check.set_valign(Gtk.Align.CENTER)
             
             if disk["is_host_disk"]:
+                 # !!! DEBUG !!!
+                 print(f"!!! UI Update: Marking {disk['path']} as insensitive.")
                  row.set_subtitle(subtitle + " (In use by host OS - Cannot select)")
                  row.set_sensitive(False) # Disable the whole row
                  check.set_sensitive(False)
@@ -372,19 +391,24 @@ class DiskPage(BaseConfigurationPage):
              # Consider adding a label to the UI group indicating this.
              
     def on_disk_toggled(self, check_button, disk_path):
-        """Handle checkbox toggle for disk selection."""
-        # Extra check: Ensure the toggled disk is not a host disk (shouldn't happen if UI is correct)
-        if disk_path in self.disk_widgets and self.disk_widgets[disk_path]["row"].get_sensitive():
+        # !!! DEBUG !!!
+        print(f"--- Toggle event for {disk_path} ---")
+        is_sensitive = disk_path in self.disk_widgets and self.disk_widgets[disk_path]["row"].get_sensitive()
+        print(f"  Row sensitive? {is_sensitive}")
+        
+        if is_sensitive:
             if check_button.get_active():
+                # !!! DEBUG !!!
+                print(f"  Adding {disk_path} to selected_disks.")
                 self.selected_disks.add(disk_path)
-                print(f"Disk selected: {disk_path}")
             else:
+                # !!! DEBUG !!!
+                print(f"  Removing {disk_path} from selected_disks.")
                 self.selected_disks.discard(disk_path)
-                print(f"Disk deselected: {disk_path}")
         else:
-             # Force inactive if a disabled row's button somehow got toggled
+             # !!! DEBUG !!!
+             print(f"  ROW NOT SENSITIVE. Forcing checkbox inactive for {disk_path}.")
              check_button.set_active(False)
-             print(f"Prevented selection of host disk: {disk_path}")
              
         self.update_complete_button_state()
 
@@ -403,22 +427,33 @@ class DiskPage(BaseConfigurationPage):
          self.update_complete_button_state()
 
     def update_complete_button_state(self):
-        """Enable the confirmation button only if conditions are met."""
-        # Ensure selected disks are not host disks (redundant check)
+        # !!! DEBUG !!!
+        print(f"--- Updating button state ---")
+        print(f"  Selected disks BEFORE validation: {self.selected_disks}")
+        
         valid_selected_disks = {d for d in self.selected_disks if d in self.disk_widgets and self.disk_widgets[d]["row"].get_sensitive()}
         if len(valid_selected_disks) != len(self.selected_disks):
-             print("Warning: Host disk found in selected_disks set. Correcting.")
+             print(f"  WARNING: Host disk found in selected_disks set. Correcting.")
              self.selected_disks = valid_selected_disks # Correct the set
              
+        print(f"  Selected disks AFTER validation: {self.selected_disks}") # DEBUG
+        
         can_proceed = (
             self.scan_completed and 
             len(self.selected_disks) > 0 and # Check the corrected set
             self.partitioning_method is not None
         )
+        print(f"  Scan completed: {self.scan_completed}") # DEBUG
+        print(f"  Valid disks selected: {len(self.selected_disks) > 0}") # DEBUG
+        print(f"  Method selected: {self.partitioning_method is not None}") # DEBUG
+        print(f"  Setting Confirm button sensitive: {can_proceed}") # DEBUG
         self.complete_button.set_sensitive(can_proceed)
         
     def apply_settings_and_return(self, button):
-        """Confirms storage plan, generates commands, stores config, and returns to summary."""
+        # !!! DEBUG !!!
+        print(f"--- Apply Settings START ---")
+        print(f"  Selected disks at start: {self.selected_disks}")
+        
         # Re-validate conditions before proceeding
         self.update_complete_button_state()
         if not self.complete_button.get_sensitive():
@@ -434,10 +469,11 @@ class DiskPage(BaseConfigurationPage):
              return
 
         print(f"--- Confirming Storage Plan ---")
-        print(f"  Selected Disks: {list(self.selected_disks)}")
+        # !!! DEBUG !!!
+        print(f"  Selected Disks before generating commands: {list(self.selected_disks)}")
         print(f"  Partitioning Method: {self.partitioning_method}")
         
-        # Initialize config with basic info
+        # Initialize config_values
         config_values = {
             "method": self.partitioning_method,
             "target_disks": sorted(list(self.selected_disks)), 
@@ -445,7 +481,18 @@ class DiskPage(BaseConfigurationPage):
         }
 
         if self.partitioning_method == "AUTOMATIC":
+            # !!! DEBUG !!! Check again just before using
+            if not self.selected_disks:
+                 print("!!! ERROR: No disks selected in apply_settings_and_return despite button being sensitive!")
+                 self.show_toast("Internal Error: No disk selected.")
+                 return
             primary_disk = sorted(list(self.selected_disks))[0]
+            # !!! DEBUG !!! Check if primary_disk is sensitive (should be)
+            if primary_disk not in self.disk_widgets or not self.disk_widgets[primary_disk]["row"].get_sensitive():
+                 print(f"!!! ERROR: Primary disk {primary_disk} is marked as unusable but was selected!")
+                 self.show_toast(f"Internal Error: Cannot use disk {primary_disk}.")
+                 return 
+                 
             print(f"  Generating AUTOMATIC partitioning commands for: {primary_disk}")
             
             # Generate the command lists
@@ -498,17 +545,8 @@ class DiskPage(BaseConfigurationPage):
         print("Storage plan confirmed. Returning to summary.") # Keep terminal log
         super().mark_complete_and_return(button, config_values=config_values)
         
-        # --- TODO: Implement actual partitioning logic here --- 
-        # This would involve: 
-        # 1. Warning the user about data loss.
-        # 2. Based on self.partitioning_method:
-        #    - AUTOMATIC: Define a default partition scheme (e.g., /boot/efi, /, swap?)
-        #                 Calculate sizes based on selected disk(s).
-        #                 Call parted/mkfs/lvm/etc. to create partitions/filesystems.
-        #    - MANUAL: Launch a separate partitioning tool UI (like GParted integrated) or 
-        #              provide a detailed manual setup interface (very complex).
-        # 3. Mount the created filesystems under a target directory (e.g., /mnt/sysimage).
-        
+        # --- REMOVED REDUNDANT TODO/SIMULATION CODE --- 
+
         if self.partitioning_method == "AUTOMATIC":
             self.show_toast(f"Automatic partitioning on {', '.join(sorted(list(self.selected_disks)))} requested." )
             # Simulate success for now
