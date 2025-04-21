@@ -204,9 +204,9 @@ class DiskPage(BaseConfigurationPage):
          pass 
 
     def scan_for_disks(self, button):
-        """Runs lsblk to find disks, checks host usage, and updates the UI."""
+        """Runs lsblk once, checks host usage based on JSON tree, and updates the UI."""
         print("Scanning for disks using lsblk...")
-        button.set_sensitive(False) 
+        button.set_sensitive(False)
         self.show_toast("Scanning for storage devices...")
         self.scan_completed = False
         self.partitioning_method = None
@@ -229,88 +229,90 @@ class DiskPage(BaseConfigurationPage):
         # --- End Host Usage Info ---
 
         try:
-            # Run lsblk, request JSON output (-J), sizes in bytes (-b), specific columns
-            # Add PKNAME to get parent device name for checking partitions
-            cmd = ["lsblk", "-J", "-b", "-p", "-o", "NAME,PATH,SIZE,MODEL,TYPE,PKNAME"] # Added -p, PKNAME
+            # Run lsblk ONCE, get JSON tree, request partition parent (PKNAME)
+            cmd = ["lsblk", "-J", "-b", "-p", "-o", "NAME,PATH,SIZE,MODEL,TYPE,PKNAME"]
+            print(f"Running: {' '.join(cmd)}") # Log the command
             result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
             lsblk_data = json.loads(result.stdout)
             
             self.detected_disks = []
-            
-            # Helper to check if a device or its partitions are used by the host
-            def is_device_used_by_host(device_path):
-                 print(f"--- Checking host usage for {device_path} ---") # DEBUG
-                 print(f"  Host PVs: {self.host_pvs}") # DEBUG
-                 print(f"  Host Mount Sources: {list(self.host_mounts.values())}") # DEBUG
-                 
-                 # Check if device itself is a host LVM PV
-                 is_pv = device_path in self.host_pvs
-                 print(f"  Is {device_path} a PV? {is_pv}") # DEBUG
-                 if is_pv:
-                      return True
-                      
-                 # Check if device itself is a source for a host mount
-                 is_mount_source = device_path in self.host_mounts.values()
-                 print(f"  Is {device_path} a mount source? {is_mount_source}") # DEBUG
-                 if is_mount_source:
-                      return True
-                      
-                 # Check partitions of the device
-                 print(f"  Checking partitions of {device_path}...") # DEBUG
-                 try:
-                     part_cmd = ["lsblk", "-J", "-b", "-p", "-o", "PATH,TYPE", device_path]
-                     part_result = subprocess.run(part_cmd, capture_output=True, text=True, check=False, timeout=5)
-                     if part_result.returncode == 0:
-                         part_data = json.loads(part_result.stdout)
-                         if "blockdevices" in part_data and len(part_data["blockdevices"]) > 0:
-                              children = part_data["blockdevices"][0].get("children", [])
-                              print(f"    Partitions found: {[c.get('path') for c in children]}") # DEBUG
-                              for child in children:
-                                   child_path = child.get("path")
-                                   if not child_path: continue
-                                   print(f"    Checking partition {child_path}...") # DEBUG
-                                   # Check if partition is a host LVM PV
-                                   is_child_pv = child_path in self.host_pvs
-                                   print(f"      Is {child_path} a PV? {is_child_pv}") # DEBUG
-                                   if is_child_pv:
-                                        return True
-                                   # Check if partition is a source for a host mount
-                                   is_child_mount_source = child_path in self.host_mounts.values()
-                                   print(f"      Is {child_path} a mount source? {is_child_mount_source}") # DEBUG
-                                   if is_child_mount_source:
-                                        return True
-                         else:
-                              print(f"    No partitions found via lsblk for {device_path}.") # DEBUG
-                     else:
-                          print(f"    lsblk failed for partitions of {device_path} (rc={part_result.returncode})") # DEBUG
-                 except Exception as e:
-                      print(f"  Warning: Failed to check partitions of {device_path} for host usage: {e}")
-                      
-                 print(f"--- Finished checking {device_path}, determined NOT used by host. ---") # DEBUG
-                 return False 
+            partition_info = {} # Store {part_path: parent_disk_path}
+            all_block_devices = lsblk_data.get("blockdevices", [])
 
-            if "blockdevices" in lsblk_data:
-                for device in lsblk_data["blockdevices"]:
-                    # Filter for devices of type 'disk'
-                    if device.get("type") == "disk" and not any(s in (device.get("model") or "").upper() for s in ["CD", "DVD"]):
-                        disk_path = device.get("path") 
-                        if not disk_path: continue # Skip if no path
+            # --- First pass: Extract all partitions and their parents ---
+            print("--- Parsing lsblk JSON for partitions and parents ---")
+            for device in all_block_devices:
+                # Recursively check children
+                children = device.get("children", [])
+                parent_path = device.get("path")
+                if parent_path and children:
+                     queue = children[:]
+                     while queue:
+                          child = queue.pop(0)
+                          child_path = child.get("path")
+                          child_type = child.get("type")
+                          # Use PKNAME if available and seems correct, otherwise use parent from tree search
+                          pkname = child.get("pkname")
+                          current_parent_path = pkname if (pkname and pkname in child_path) else parent_path
+                          
+                          if child_path and child_type == "part":
+                               partition_info[child_path] = current_parent_path
+                               print(f"  Found Partition: {child_path} -> Parent: {current_parent_path}")
+                          
+                          # Add grandchildren to queue if they exist
+                          grandchildren = child.get("children", [])
+                          if grandchildren:
+                               queue.extend(grandchildren)
+            print(f"--- Finished parsing partitions: {partition_info} ---")
 
-                        is_host_disk = is_device_used_by_host(disk_path)
-                        # !!! DEBUG !!!
-                        print(f"!!! RESULT for {disk_path}: is_host_disk = {is_host_disk}") 
-                        
-                        disk_info = {
-                            "name": device.get("name", "N/A"),
-                            "path": disk_path, 
-                            "size": device.get("size"), 
-                            "model": device.get("model", "Unknown Model").strip(),
-                            "is_host_disk": is_host_disk # Store host usage flag
-                        }
-                        self.detected_disks.append(disk_info)
-            
+            # --- Identify host-used partitions ---
+            host_used_partitions = set(self.host_mounts.values()) | self.host_pvs
+            print(f"--- Host used partitions/PVs: {host_used_partitions} ---")
+
+            # --- Second pass: Process disks and check usage ---
+            print("--- Processing disks and checking host usage ---")
+            for device in all_block_devices:
+                if device.get("type") == "disk" and not any(s in (device.get("model") or "").upper() for s in ["CD", "DVD"]):
+                    disk_path = device.get("path")
+                    if not disk_path: continue
+
+                    is_host_disk = False
+                    print(f"--- Checking host usage for Disk: {disk_path} ---")
+
+                    # Check if disk itself is directly used (e.g., PV on whole disk)
+                    if disk_path in self.host_pvs or disk_path in self.host_mounts.values():
+                        print(f"  Disk {disk_path} is directly used by host (PV or mount source).")
+                        is_host_disk = True
+                    else:
+                        # Check if any partition belonging to this disk is used
+                        print(f"  Checking partitions belonging to {disk_path}...")
+                        found_used_partition = False
+                        for part_path, parent_disk in partition_info.items():
+                            if parent_disk == disk_path:
+                                print(f"    Found child partition: {part_path}")
+                                if part_path in host_used_partitions:
+                                    print(f"    Partition {part_path} IS used by host.")
+                                    is_host_disk = True
+                                    found_used_partition = True
+                                    break # Found a used partition, no need to check others for this disk
+                                else:
+                                     print(f"    Partition {part_path} is NOT used by host.")
+                        if not found_used_partition:
+                             print(f"  No partitions of {disk_path} found to be used by host.")
+
+
+                    print(f"!!! RESULT for {disk_path}: is_host_disk = {is_host_disk}")
+                    disk_info = {
+                        "name": device.get("name", "N/A"), # Keep original name if needed elsewhere
+                        "path": disk_path,
+                        "size": device.get("size"),
+                        "model": device.get("model", "Unknown Model").strip(),
+                        "is_host_disk": is_host_disk
+                    }
+                    self.detected_disks.append(disk_info)
+
             print(f"Detected disks (including host usage check): {self.detected_disks}")
-            self.update_disk_list_ui() # Update UI with host usage info
+            self.update_disk_list_ui()
             self.scan_completed = True
             self.show_toast(f"Scan complete. Found {len(self.detected_disks)} disk(s).")
             # Show groups now that scan is done
@@ -340,7 +342,6 @@ class DiskPage(BaseConfigurationPage):
         finally:
             # Re-enable scan button regardless of outcome
             button.set_sensitive(True)
-            # Update confirmation button state based on scan results AND host usage
             self.update_complete_button_state()
             
     def update_disk_list_ui(self):
