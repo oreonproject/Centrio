@@ -195,6 +195,19 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
                           
                 # Construct mount command correctly
                 mount_cmd = ["mount"]
+                
+                # --- Special Handling for resolv.conf bind mount ---
+                # If target file exists, remove it first, as mount --bind might require it.
+                if name == "bind" and source == "/etc/resolv.conf":
+                    if os.path.exists(target):
+                        print(f"  Target file {target} exists. Removing before bind mount.")
+                        try:
+                            os.remove(target)
+                        except OSError as rm_e:
+                            print(f"  Warning: Failed to remove existing {target}: {rm_e}")
+                            # Continue anyway, maybe mount will still work or overwrite?
+                # --------------------------------------------------
+                
                 if fstype:
                     mount_cmd.extend(["-t", fstype])
                 
