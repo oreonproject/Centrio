@@ -250,73 +250,86 @@ class DiskPage(BaseConfigurationPage):
                             continue # Restart loop with the new source device path
                         else:
                             print(f"    ERROR: Could not find source device for backing file directory {backing_file_dir}")
-                            return None
-                    elif backing_file == "(deleted)":
-                         # --- Attempt to trace via the loop device's parent in lsblk ---
-                         # This is a fallback if the backing file is deleted (common in overlayfs)
-                         print(f"    Backing file for {current_path} is deleted (overlayfs?). Trying lsblk parent (pkname)...")
-                         if current_path in path_map:
-                              parent_path = path_map[current_path]["pkname"]
-                              if parent_path:
-                                   print(f"    Found lsblk parent (pkname): {parent_path}. Continuing trace from parent.")
-                                   current_path = parent_path
-                                   continue # Restart loop with the parent device path
-                              else:
-                                   print(f"    ERROR: Loop device {current_path} with deleted backing file has no pkname in lsblk.")
-                                   return None
+                            # If findmnt fails, try the pkname fallback below
+                            print(f"    Falling back to check pkname for loop device {current_path}...")
+                            # pass # Let it fall through to pkname check
+
+                    # Fallback for (deleted) or if findmnt failed for non-deleted
+                    # --- Attempt to trace via the loop device's parent in lsblk ---
+                    print(f"    Trying lsblk parent (pkname) for loop device {current_path}...")
+                    if current_path in path_map:
+                         parent_path = path_map[current_path]["pkname"]
+                         if parent_path:
+                              print(f"    Found lsblk parent (pkname): {parent_path}. Continuing trace from parent.")
+                              current_path = parent_path
+                              continue # Restart loop with the parent device path
                          else:
-                              # Should not happen if map was built correctly
-                              print(f"    ERROR: Loop device {current_path} not found in path_map for pkname lookup.")
+                              print(f"    ERROR: Loop device {current_path} has no pkname in lsblk.")
                               return None
-                         # --- End Fallback ---
                     else:
-                         print(f"    ERROR: Could not determine backing file for {current_path}")
+                         # Should not happen if map was built correctly
+                         print(f"    ERROR: Loop device {current_path} not found in path_map for pkname lookup.")
                          return None
+                    # --- End Fallback ---
+
                 except subprocess.CalledProcessError as e:
                      print(f"  ERROR: Command failed while processing loop device {current_path}: {' '.join(e.cmd)}")
                      print(f"  Stderr: {e.stderr}")
-                     return None
+                     print(f"  Continuing trace without resolving loop device further...") # Try to continue if command fails
+                     # Let it fall through to the general path/pkname check below
                 except Exception as e:
                     print(f"  ERROR: Failed to process loop device {current_path}: {e}")
-                    return None
+                    return None # Critical error if something else goes wrong
             # --- End Handle Loop Device ---
-            
+
             # --- Handle Device Mapper ---
-            # Example: /dev/mapper/live-rw often maps to a loop device
-            # We need to check if current_path *itself* has a pkname that is useful
             elif current_path.startswith("/dev/mapper/"):
-                 print(f"  Path {current_path} is a device mapper device. Checking lsblk parent (pkname)...")
-                 if current_path in path_map:
-                      parent_path = path_map[current_path]["pkname"]
-                      if parent_path:
-                           print(f"    Found lsblk parent (pkname): {parent_path}. Continuing trace from parent.")
-                           current_path = parent_path
-                           continue # Restart loop with parent path
-                      else:
-                           # Sometimes DM devices don't have a direct pkname in lsblk?
-                           # Could try 'dmsetup deps' but let's rely on lsblk for now.
-                           print(f"    Warning: Device mapper path {current_path} has no pkname in lsblk.")
-                           # Proceed to general check below, maybe it's listed directly?
+                 print(f"  Path {current_path} is a device mapper device. Checking lsblk parent (pkname)...\")
+                 parent_path = path_map.get(current_path, {}).get("pkname")
+
+                 if parent_path:
+                      print(f"    Found lsblk parent (pkname): {parent_path}. Continuing trace from parent.")
+                      current_path = parent_path
+                      continue # Restart loop with parent path
                  else:
-                      # Should not happen if map was built correctly
-                      print(f"    ERROR: Device mapper path {current_path} not found in path_map for pkname lookup.")
-                      # Proceed to general check? Might fail.
+                      print(f"    Warning: Device mapper path {current_path} has no pkname in lsblk. Trying dmsetup...")
+                      try:
+                           cmd_dmsetup = ["dmsetup", "deps", "-o", "devname", current_path]
+                           result_dmsetup = subprocess.run(cmd_dmsetup, capture_output=True, text=True, check=True, timeout=5)
+                           # Output format: " device_name (major:minor)\n ..."
+                           # We want the first device_name
+                           deps_output = result_dmsetup.stdout.strip()
+                           match = re.search(r"^\s*(\S+)", deps_output) # Find first non-whitespace sequence
+                           if match:
+                                underlying_dev = match.group(1)
+                                # Ensure it's a device path
+                                if underlying_dev.startswith("/dev/"):
+                                     print(f"    Found underlying device via dmsetup: {underlying_dev}. Continuing trace.")
+                                     current_path = underlying_dev
+                                     continue # Restart loop with the underlying device
+                                else:
+                                     print(f"    Warning: dmsetup output '{underlying_dev}' doesn't look like a device path.")
+                           else:
+                                print(f"    Warning: Could not parse underlying device from dmsetup output: {deps_output}")
+                      except FileNotFoundError:
+                           print(f"    ERROR: dmsetup command not found. Cannot resolve DM dependency for {current_path}.")
+                           return None # Cannot proceed without dmsetup if pkname missing
+                      except subprocess.CalledProcessError as e:
+                           print(f"    ERROR: dmsetup failed for {current_path}: {e.stderr}")
+                           # Proceed to general check below? Might fail.
+                      except Exception as e:
+                           print(f"    ERROR: Unexpected error running dmsetup for {current_path}: {e}")
+                           # Proceed to general check below? Might fail.
+
+                      print(f"    Falling back to general check for {current_path} after dmsetup attempt.")
+                      # If dmsetup fails or doesn't find a usable path, proceed to general check below
 
             # --- General Path Check ---
             if current_path not in path_map:
-                print(f"  Error: Path {current_path} not found in initial lsblk map.")
-                # This can happen if findmnt source is e.g. /dev/dm-N which wasn't the original root source
-                # Or if the loop device's backing file was on a device not fully mapped initially.
-                # Try a final lookup in the full block_devices list?
-                found_in_map = False
-                for dev_path_lookup, data in path_map.items():
-                     if dev_path_lookup == current_path:
-                          path_map[current_path] = data # Ensure it's there if somehow missed
-                          found_in_map = True
-                          break
-                if not found_in_map:
-                     print(f"  Path {current_path} truly not found, cannot trace further.")
-                     return None
+                print(f"  Error: Path {current_path} not found in lsblk map (needed for type/pkname check).")
+                # It might have been resolved via dmsetup/losetup to a path not originally scanned
+                # If we can't find it now, we cannot determine if it's a 'disk' or find its parent.
+                return None
 
 
             dev_info = path_map[current_path]["info"]
@@ -330,13 +343,15 @@ class DiskPage(BaseConfigurationPage):
             if not parent_path:
                  print(f"  Error: Path {current_path} (type: {dev_type}) has no parent (pkname).")
                  # If it's a disk but type wasn't exactly 'disk', maybe return anyway?
-                 if dev_type and "disk" in dev_type.lower(): return current_path
-                 return None
+                 if dev_type and "disk" in dev_type.lower():
+                      print(f"  Treating path {current_path} as disk based on type '{dev_type}'.")
+                      return current_path
+                 return None # Cannot trace further without parent
 
             current_path = parent_path
 
         if current_path in visited: print(f"  Error: Loop detected while tracing parent for {target_path}")
-        else: print(f"  Error: Could not find parent disk for {target_path}")
+        else: print(f"  Error: Could not find parent disk for {target_path} (trace ended unexpectedly)")
         return None
 
     def scan_for_disks(self, button):
