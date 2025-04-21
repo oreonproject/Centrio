@@ -143,23 +143,35 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
         print(f"Setting up chroot environment in {target_root}...")
         
         # Prepare target directories/files first
-        if not os.path.exists(mount_points["resolv.conf"]):
-            # Ensure target /etc/resolv.conf exists or can be created
+        resolv_conf_target = mount_points["resolv.conf"]
+        resolv_conf_dir = os.path.dirname(resolv_conf_target)
+        if not os.path.exists(resolv_conf_dir):
+             # Ensure target /etc directory exists
+             try:
+                 print(f"  Creating directory {resolv_conf_dir}...")
+                 os.makedirs(resolv_conf_dir, exist_ok=True)
+             except OSError as e:
+                 raise RuntimeError(f"Failed to create target directory {resolv_conf_dir}: {e}") from e
+                 
+        # Ensure target /etc/resolv.conf file exists for bind mount
+        if not os.path.exists(resolv_conf_target):
             try:
-                 os.makedirs(os.path.dirname(mount_points["resolv.conf"]), exist_ok=True)
-                 # Create an empty file if it doesn't exist, needed for bind mount target
-                 with open(mount_points["resolv.conf"], 'a'): os.utime(mount_points["resolv.conf"], None)
+                 print(f"  Creating empty file {resolv_conf_target} for bind mount...")
+                 # Use 'w' to create if it doesn't exist, then close immediately.
+                 open(resolv_conf_target, 'w').close()
+                 # Optionally set permissions? Might not be necessary.
             except OSError as e:
-                 raise RuntimeError(f"Failed to prepare target resolv.conf {mount_points['resolv.conf']}: {e}") from e
+                 raise RuntimeError(f"Failed to create target file {resolv_conf_target}: {e}") from e
                  
         if os.path.exists(host_dbus_socket):
+             dbus_target_dir = os.path.dirname(mount_points["dbus"])
              try:
-                 os.makedirs(os.path.dirname(mount_points["dbus"]), exist_ok=True)
+                 os.makedirs(dbus_target_dir, exist_ok=True)
                  # Create an empty file for the socket bind mount target?
                  # Or maybe just mount the socket file directly? Mount requires dir for source/target usually?
                  # Let's try mounting the socket file directly using --bind.
              except OSError as e:
-                 raise RuntimeError(f"Failed to prepare target D-Bus directory {os.path.dirname(mount_points['dbus'])}: {e}") from e
+                 raise RuntimeError(f"Failed to prepare target D-Bus directory {dbus_target_dir}: {e}") from e
         else:
              print(f"Warning: Host D-Bus socket {host_dbus_socket} not found. Services inside chroot might fail.")
 
