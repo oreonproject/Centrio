@@ -647,6 +647,20 @@ class ProgressPage(Gtk.Box):
                 
                 step_success = func(data) 
                 
+                # --- Add explicit /etc check+create after package install ---
+                if func == self._install_packages and step_success:
+                    etc_path = os.path.join(self.target_root, "etc")
+                    if not os.path.exists(etc_path):
+                        print(f"Warning: {etc_path} not found after package install. Creating it...")
+                        try:
+                            os.makedirs(etc_path, exist_ok=True)
+                            print(f"Successfully created {etc_path}.")
+                        except OSError as e:
+                            print(f"ERROR: Failed to create {etc_path}: {e}")
+                            self.installation_error = f"Failed to create essential directory {etc_path}: {e}"
+                            step_success = False # Mark step as failed
+                # ---------------------------------------------------------
+                
                 if not step_success:
                     final_success = False
                     if not self.installation_error:
