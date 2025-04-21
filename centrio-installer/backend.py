@@ -66,6 +66,25 @@ def _run_command(command_list, description, progress_callback=None, timeout=None
                 # else: use the generic error_msg already set
             
             print(f"ERROR: {error_msg}")
+            
+            # --- Add dmesg logging on error --- 
+            print("--- Attempting to get last kernel messages (dmesg) ---")
+            try:
+                 # Run dmesg directly, not via _run_command to avoid loops/pkexec issues
+                 dmesg_cmd = ["dmesg"] # Request last few lines might be better
+                 dmesg_process = subprocess.run(dmesg_cmd, capture_output=True, text=True, check=False, timeout=5)
+                 if dmesg_process.stdout:
+                      last_lines = "\n".join(dmesg_process.stdout.strip().split('\n')[-20:]) # Get last 20 lines
+                      print(f"Last ~20 lines of dmesg:\n{last_lines}")
+                 else:
+                      print("Could not capture dmesg output.")
+                 if dmesg_process.stderr:
+                      print(f"dmesg stderr: {dmesg_process.stderr.strip()}")
+            except Exception as dmesg_e:
+                 print(f"Failed to run or capture dmesg: {dmesg_e}")
+            print("-----------------------------------------------------")
+            # --- End dmesg logging --- 
+            
             return False, error_msg, stdout_output.strip() 
             
         print(f"SUCCESS: {description} completed ({execution_method}).")
@@ -433,6 +452,25 @@ def install_packages_dnf(target_root, progress_callback=None):
             error_msg = f"DNF installation failed (rc={return_code}). Stderr:\n{stderr_output.strip()}"
             print(f"ERROR: {error_msg}")
             if progress_callback: progress_callback(error_msg, last_fraction)
+            
+            # --- Add dmesg logging on error --- 
+            print("--- Attempting to get last kernel messages (dmesg) ---")
+            try:
+                 # Run dmesg directly, not via _run_command to avoid loops/pkexec issues
+                 dmesg_cmd = ["dmesg"] # Request last few lines might be better
+                 dmesg_process = subprocess.run(dmesg_cmd, capture_output=True, text=True, check=False, timeout=5)
+                 if dmesg_process.stdout:
+                      last_lines = "\n".join(dmesg_process.stdout.strip().split('\n')[-20:]) # Get last 20 lines
+                      print(f"Last ~20 lines of dmesg:\n{last_lines}")
+                 else:
+                      print("Could not capture dmesg output.")
+                 if dmesg_process.stderr:
+                      print(f"dmesg stderr: {dmesg_process.stderr.strip()}")
+            except Exception as dmesg_e:
+                 print(f"Failed to run or capture dmesg: {dmesg_e}")
+            print("-----------------------------------------------------")
+            # --- End dmesg logging --- 
+            
             return False, error_msg
         else:
              print(f"SUCCESS: DNF installation completed.")
