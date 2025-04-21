@@ -6,6 +6,7 @@ import os
 import re # For parsing os-release
 from .utils import get_os_release_info
 import errno # For checking mount errors
+import time   # For delays
 
 def _run_command(command_list, description, progress_callback=None, timeout=None, pipe_input=None):
     """Runs a command, using pkexec if not already root, captures output, handles errors.
@@ -615,84 +616,186 @@ def _start_service(service_name):
 
 # --- LVM Deactivation Helper --- 
 def _deactivate_lvm_on_disk(disk_device, progress_callback=None):
-    """Attempts to find and deactivate LVM VGs associated with a disk."""
-    print(f"Checking for and deactivating LVM on {disk_device}...")
+    """Attempts to find and deactivate LVM VGs associated with a disk and its partitions."""
+    print(f"Checking for and deactivating LVM on {disk_device} and its partitions...")
     if progress_callback:
         progress_callback(f"Checking LVM on {disk_device}...", None) # Text only update
-        
+
+    devices_to_check = set([disk_device])
+    vg_names_found = set()
+    all_success = True
+    errors = []
+
+    # 1. Find partitions of the main disk
     try:
-        # 1. Find PVs on the disk
-        pvs_cmd = ["pvs", "--noheadings", "-o", "vg_name", "--select", f"pv_name={disk_device}"]
-        pvs_success, pvs_err, pvs_stdout = _run_command(pvs_cmd, f"Find LVM PVs on {disk_device}")
-        
-        if not pvs_success:
-             # pvs fails if no PVs found, this is not necessarily an error here
-             if "No physical volume found" in pvs_err or "No PVs found" in pvs_stdout:
-                 print(f"  No LVM Physical Volumes found directly on {disk_device}.")
-                 return True, "" # Not an error
-             else:
-                 print(f"  Warning: Failed to check for PVs on {disk_device}: {pvs_err}")
-                 return False, pvs_err # Real error
-
-        vg_names = set(line.strip() for line in pvs_stdout.splitlines() if line.strip())
-        if not vg_names:
-             print(f"  No LVM Volume Groups associated with PV {disk_device}.")
-             return True, ""
-
-        # 2. Deactivate associated VGs
-        print(f"  Found LVM VGs associated with {disk_device}: {vg_names}. Attempting deactivation...")
-        all_deactivated = True
-        final_err = ""
-        for vg_name in vg_names:
-             vgchange_cmd = ["vgchange", "-an", vg_name]
-             vg_success, vg_err, _ = _run_command(vgchange_cmd, f"Deactivate VG {vg_name}")
-             if not vg_success:
-                 print(f"    Warning: Failed to deactivate VG {vg_name}: {vg_err}")
-                 all_deactivated = False
-                 final_err += f"Failed to deactivate VG {vg_name}: {vg_err}\n"
-             else:
-                  print(f"    Successfully deactivated VG {vg_name}.")
-                  
-        if progress_callback:
-             status = "Deactivation complete." if all_deactivated else "Deactivation attempted, some errors."
-             progress_callback(f"LVM Check on {disk_device}: {status}", None)
-             
-        return all_deactivated, final_err.strip()
-
+        lsblk_cmd = ["lsblk", "-n", "-o", "PATH", "--raw", disk_device]
+        print(f"  Running: {' '.join(shlex.quote(c) for c in lsblk_cmd)}")
+        lsblk_result = subprocess.run(lsblk_cmd, capture_output=True, text=True, check=False, timeout=10)
+        if lsblk_result.returncode == 0:
+            found_paths = [line.strip() for line in lsblk_result.stdout.split('\n') if line.strip() and line.strip() != disk_device]
+            print(f"  Found potential partition paths via lsblk: {found_paths}")
+            devices_to_check.update(found_paths)
+        else:
+            print(f"  Warning: lsblk failed for {disk_device} (rc={lsblk_result.returncode}), checking only base device for PVs.")
     except Exception as e:
-        err = f"Unexpected error during LVM deactivation check for {disk_device}: {e}"
-        print(f"ERROR: {err}")
-        return False, err 
+        print(f"  Warning: Error running lsblk to find partitions for {disk_device}: {e}")
+        # Continue with just the base disk_device
+
+    # 2. Find VGs associated with each device (disk + partitions)
+    print(f"  Checking devices for LVM PVs: {list(devices_to_check)}")
+    for device in devices_to_check:
+        try:
+            pvs_cmd = ["pvs", "--noheadings", "-o", "vg_name", "--select", f"pv_name={device}"]
+            # Use subprocess directly here as _run_command adds too much noise for non-errors
+            print(f"    Checking PV on {device}...")
+            result = subprocess.run(pvs_cmd, capture_output=True, text=True, check=False, timeout=10)
+            
+            if result.returncode == 0:
+                vgs = set(line.strip() for line in result.stdout.splitlines() if line.strip())
+                if vgs:
+                     print(f"      Found VGs on {device}: {vgs}")
+                     vg_names_found.update(vgs)
+            elif "No physical volume found" in result.stderr or "No PVs found" in result.stdout:
+                # This is expected if the device isn't an LVM PV
+                pass
+            else:
+                 # Real error running pvs
+                 err_msg = f"Failed to run pvs for {device}: {result.stderr.strip()}"
+                 print(f"    Warning: {err_msg}")
+                 errors.append(err_msg)
+                 all_success = False # Mark as potentially incomplete
+                 
+        except Exception as e:
+             err_msg = f"Unexpected error checking PV on {device}: {e}"
+             print(f"    ERROR: {err_msg}")
+             errors.append(err_msg)
+             all_success = False
+             
+    if not vg_names_found:
+         print(f"  No LVM Volume Groups found associated with {disk_device} or its partitions.")
+         return True, "" # Not an error if no VGs found
+
+    # 3. Deactivate all found VGs
+    print(f"  Found unique LVM VGs to deactivate: {vg_names_found}. Attempting deactivation...")
+    for vg_name in vg_names_found:
+         vgchange_cmd = ["vgchange", "-an", vg_name]
+         # Use _run_command here as deactivation failure is important
+         vg_success, vg_err, _ = _run_command(vgchange_cmd, f"Deactivate VG {vg_name}")
+         if not vg_success:
+             print(f"    Warning: Failed to deactivate VG {vg_name}: {vg_err}")
+             errors.append(f"Failed to deactivate VG {vg_name}: {vg_err}")
+             all_success = False
+         else:
+              print(f"    Successfully deactivated VG {vg_name}.")
+              time.sleep(0.5) # Small delay after deactivation
+              
+    if progress_callback:
+         status = "Deactivation complete." if all_success and not errors else "Deactivation attempted, some errors occurred."
+         progress_callback(f"LVM Check on {disk_device}: {status}", None)
+         
+    final_error_str = "\n".join(errors)
+    return all_success, final_error_str
 
 # --- Device Mapper Removal Helper --- 
 def _remove_dm_mappings(disk_device, progress_callback=None):
-    """Attempts to remove device-mapper mappings associated with a disk."""
-    # Note: This was previously using dmsetup remove_all --force, which is risky
-    # and might interfere with the host system. Disabling for now.
-    # A safer approach would involve identifying specific mappings related 
-    # only to the target disk based on 'lsblk' or 'dmsetup ls --tree'.
-    print(f"Skipping removal of device-mapper mappings for {disk_device} (previously used remove_all).")
+    """Attempts to find and remove device-mapper mappings for LVM LVs on a disk."""
+    print(f"Checking for and removing LVM device-mapper mappings associated with {disk_device}...")
     if progress_callback:
-        progress_callback(f"Skipping DM mapping removal for {disk_device}.", None)
-    
-    # # --- Original Risky Code ---
-    # print(f"Attempting to remove any lingering device-mapper mappings related to {disk_device}...")
-    # if progress_callback:
-    #     progress_callback(f"Checking device-mapper on {disk_device}...", None)
-    
-    # dmsetup_cmd = ["dmsetup", "remove_all", "--force"]
-    # success, err, stdout = _run_command(dmsetup_cmd, f"Remove all device-mapper mappings (force)")
-    
-    # if not success:
-    #      if "No devices found" in err or "not found" in err or "not found" in stdout:
-    #          print(f"  No active device-mapper mappings found or removed.")
-    #          return True, "" # Not an error
-    #      else:
-    #          print(f"  Warning: 'dmsetup remove_all --force' failed: {err} {stdout}")
-    #          return True, f"Warning during dmsetup remove_all: {err}" # Return success but pass warning
-    # else:
-    #     print(f"  Successfully ran 'dmsetup remove_all --force'. Output: {stdout}")
-    #     return True, "" 
-    # # --- End Original Risky Code ---
-    
-    return True, "Skipped potentially risky dmsetup remove_all." # Return success, indicate skip 
+        progress_callback(f"Removing DM mappings for {disk_device}...", None)
+
+    devices_to_check = set([disk_device])
+    vg_names_found = set()
+    lvs_to_remove = set() # Store LV paths like /dev/vg/lv or /dev/mapper/vg-lv
+    all_success = True
+    errors = []
+
+    # 1. Find partitions (same logic as _deactivate_lvm_on_disk)
+    try:
+        lsblk_cmd = ["lsblk", "-n", "-o", "PATH", "--raw", disk_device]
+        lsblk_result = subprocess.run(lsblk_cmd, capture_output=True, text=True, check=False, timeout=10)
+        if lsblk_result.returncode == 0:
+            devices_to_check.update([p.strip() for p in lsblk_result.stdout.split('\n') if p.strip()])
+    except Exception:
+        pass # Ignore errors, just use base disk device
+
+    # 2. Find VGs associated with each device
+    for device in devices_to_check:
+        try:
+            pvs_cmd = ["pvs", "--noheadings", "-o", "vg_name", "--select", f"pv_name={device}"]
+            result = subprocess.run(pvs_cmd, capture_output=True, text=True, check=False, timeout=10)
+            if result.returncode == 0:
+                vg_names_found.update(line.strip() for line in result.stdout.splitlines() if line.strip())
+        except Exception as e:
+            errors.append(f"Error finding VGs on {device}: {e}")
+            all_success = False
+            
+    if not vg_names_found:
+         print(f"  No LVM Volume Groups found for {disk_device}, skipping dmsetup removal.")
+         return True, ""
+
+    # 3. Find LVs within those VGs
+    print(f"  Found VGs: {vg_names_found}. Checking for associated LVs...")
+    for vg_name in vg_names_found:
+        try:
+             # Get LV paths, prefer /dev/mapper/ format if possible, else /dev/vg/lv
+             lvs_cmd = ["lvs", "--noheadings", "-o", "lv_path", vg_name]
+             result = subprocess.run(lvs_cmd, capture_output=True, text=True, check=False, timeout=10)
+             if result.returncode == 0:
+                 lv_paths = set(line.strip() for line in result.stdout.splitlines() if line.strip())
+                 if lv_paths:
+                      print(f"    Found LVs in VG {vg_name}: {lv_paths}")
+                      lvs_to_remove.update(lv_paths)
+             else:
+                 err_msg = f"Failed to list LVs for VG {vg_name}: {result.stderr.strip()}"
+                 print(f"    Warning: {err_msg}")
+                 errors.append(err_msg)
+                 all_success = False
+        except Exception as e:
+             err_msg = f"Unexpected error listing LVs for VG {vg_name}: {e}"
+             print(f"    ERROR: {err_msg}")
+             errors.append(err_msg)
+             all_success = False
+             
+    if not lvs_to_remove:
+        print(f"  No active LVs found in VGs {vg_names_found}.")
+        return True, "\n".join(errors) # Return success even if LVs couldn't be listed, but include errors
+
+    # 4. Remove DM mappings for found LVs
+    print(f"  Attempting to remove DM mappings for LVs: {lvs_to_remove}")
+    for lv_path in lvs_to_remove:
+        # Need the mapper name (e.g., vg--name-lv--name) which might differ from lv_path (/dev/vg_name/lv_name)
+        # We can try removing both common forms: /dev/mapper/vg-lv and the lv_path directly
+        # dmsetup usually works with the name in /dev/mapper
+        mapper_name = os.path.basename(lv_path)
+        # Attempt removal using the basename (common case)
+        dmsetup_cmd = ["dmsetup", "remove", mapper_name]
+        dm_success, dm_err, _ = _run_command(dmsetup_cmd, f"Remove DM mapping {mapper_name}")
+        
+        if dm_success:
+            print(f"    Successfully removed DM mapping {mapper_name}.")
+            time.sleep(0.5) # Small delay
+        else:
+            # If basename fails, try the full path (less common for dmsetup remove)
+            if "No such device or address" not in dm_err:
+                print(f"    Attempting removal using full path {lv_path}...")
+                dmsetup_cmd_fullpath = ["dmsetup", "remove", lv_path]
+                dm_success_fp, dm_err_fp, _ = _run_command(dmsetup_cmd_fullpath, f"Remove DM mapping {lv_path}")
+                if dm_success_fp:
+                     print(f"    Successfully removed DM mapping using full path {lv_path}.")
+                     time.sleep(0.5) # Small delay
+                elif "No such device or address" not in dm_err_fp:
+                    # Only report error if it wasn't already gone
+                    err_msg = f"Failed to remove DM mapping {mapper_name} (and {lv_path}): {dm_err_fp}"
+                    print(f"    Warning: {err_msg}")
+                    errors.append(err_msg)
+                    all_success = False # Mark as failure if any removal fails
+                # else: Ignore "No such device" error on second attempt too
+            # else: Ignore "No such device" error on first attempt
+
+    if progress_callback:
+        status = "DM removal complete." if all_success and not errors else "DM removal attempted, some errors occurred."
+        progress_callback(f"DM Check on {disk_device}: {status}", None)
+
+    final_error_str = "\n".join(errors)
+    # Return success overall unless a removal failed with an error other than "No such device"
+    return all_success, final_error_str 
