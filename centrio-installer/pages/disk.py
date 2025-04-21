@@ -284,7 +284,7 @@ class DiskPage(BaseConfigurationPage):
 
             # --- Handle Device Mapper ---
             elif current_path.startswith("/dev/mapper/"):
-                 print(f"  Path {current_path} is a device mapper device. Checking lsblk parent (pkname)...\")
+                 print(f"  Path {current_path} is a device mapper device. Checking lsblk parent (pkname)...")
                  parent_path = path_map.get(current_path, {}).get("pkname")
 
                  if parent_path:
