@@ -130,52 +130,50 @@ class ProgressPage(Gtk.Box):
 
         # --- Pre-emptive Unmount (Needed for Automatic) ---
         if method == "AUTOMATIC" and target_disks:
-            primary_disk = target_disks[0] 
+            primary_disk = target_disks[0]
             self._update_progress_text(f"Checking existing mounts on {primary_disk}...", 0.01)
             print(f"Attempting pre-emptive unmount of partitions on {primary_disk}...")
             
-            # --- Find potential mount points ---
+            # --- Find potential mount points using findmnt --- 
             mount_targets_to_check = set()
             try:
-                lsblk_cmd = ["lsblk", "-n", "-o", "PATH", "--raw", primary_disk]
-                result = subprocess.run(lsblk_cmd, capture_output=True, text=True, check=False, timeout=10)
-                if result.returncode == 0:
-                    potential_paths = [line.strip() for line in result.stdout.split('\n') if line.strip() and line.strip() != primary_disk]
-                    print(f"  lsblk identified potential paths: {potential_paths}")
-                    for path in potential_paths:
-                         try:
-                             if os.path.ismount(path):
-                                 print(f"    Confirmed mount point: {path}")
-                                 mount_targets_to_check.add(path)
-                             # else:
-                                 # print(f"    Path {path} is not a mount point.")
-                         except Exception as mount_check_e:
-                             print(f"    Warning: Error checking mount status for {path}: {mount_check_e}")
+                # Use findmnt to find anything mounted from the primary disk or its partitions
+                findmnt_cmd = ["findmnt", "-n", "-r", "-o", "TARGET", f"--source={primary_disk}"]
+                print(f"  Running: {' '.join(findmnt_cmd)}")
+                result = subprocess.run(findmnt_cmd, capture_output=True, text=True, check=False, timeout=10)
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    mount_points = [line.strip() for line in result.stdout.split('\n') if line.strip()]
+                    print(f"  findmnt identified mount points: {mount_points}")
+                    mount_targets_to_check.update(mount_points)
+                elif result.returncode != 0:
+                     print(f"  Warning: findmnt command failed (rc={result.returncode}): {result.stderr.strip()}")
                 else:
-                     print(f"Warning: lsblk failed for {primary_disk} (rc={result.returncode}), cannot reliably check for mounts. Proceeding cautiously.")
+                     print(f"  findmnt found no active mounts for sources starting with {primary_disk}.")
+                     
+            except FileNotFoundError:
+                 print("  Warning: 'findmnt' command not found. Cannot reliably check for mounts.")
             except Exception as e:
-                print(f"Warning: Error during lsblk check: {e}")
+                print(f"  Warning: Error during findmnt check: {e}")
 
             # --- Attempt Unmount --- 
             unmount_failed = False
             if mount_targets_to_check:
                 print(f"  Attempting to unmount: {sorted(list(mount_targets_to_check))}")
-                for path in sorted(list(mount_targets_to_check), reverse=True): # Unmount nested first
+                for path in sorted(list(mount_targets_to_check), reverse=True):
                     print(f"    Unmounting {path}...")
                     umount_cmd = ["umount", path]
                     try:
-                        # Try normal unmount first, enforce check
                         result = subprocess.run(umount_cmd, check=True, timeout=10, capture_output=True, text=True)
                         print(f"      Successfully unmounted {path} (stdout: {result.stdout.strip()}, stderr: {result.stderr.strip()}) ")
-                        time.sleep(2) # Increased pause after successful umount
+                        time.sleep(5) # Increased sleep to 5 seconds
                     except subprocess.CalledProcessError as e:
                         print(f"      Warning: Failed standard unmount {path} (rc={e.returncode}, stdout: {e.stdout.strip()}, stderr: {e.stderr.strip()}). Trying lazy unmount...")
-                        # Fallback to lazy unmount
                         umount_lazy_cmd = ["umount", "-l", path]
                         try:
                             result_lazy = subprocess.run(umount_lazy_cmd, check=True, timeout=10, capture_output=True, text=True)
                             print(f"        Lazy unmount successful for {path} (stdout: {result_lazy.stdout.strip()}, stderr: {result_lazy.stderr.strip()}) ")
-                            time.sleep(2) # Increased pause after successful lazy umount
+                            time.sleep(5) # Increased sleep to 5 seconds
                         except Exception as lazy_e:
                             # Capture specific error for lazy unmount failure
                             lazy_err_msg = f"Failed to unmount {path} even with lazy option: {lazy_e}"
@@ -198,34 +196,47 @@ class ProgressPage(Gtk.Box):
             if unmount_failed:
                 return False # Exit if unmount failed
 
-            # --- lsof Check (After Unmount Attempts) --- 
+            # --- Run udevadm settle and sync --- 
+            print("Running udevadm settle...")
+            try:
+                # Run directly, might not need pkexec depending on context
+                subprocess.run(["udevadm", "settle"], check=False, timeout=30)
+                print("  Udev settle complete.")
+            except FileNotFoundError:
+                 print("Warning: udevadm not found, cannot settle udev queue.")
+            except Exception as settle_e:
+                 print(f"Warning: Error running udevadm settle: {settle_e}")
+                 
+            print("Running sync command to flush buffers...")
+            try:
+                subprocess.run(["sync"], check=False, timeout=15)
+                print("  Sync complete.")
+                time.sleep(1) # Small pause after sync
+            except Exception as sync_e:
+                 print(f"Warning: Error running sync: {sync_e}")
+
+            # --- lsof Check (After Unmount Attempts, settle, and sync) --- 
             self._update_progress_text(f"Checking for processes using {primary_disk}...", 0.03)
             print(f"Running lsof on {primary_disk} to check for busy resources...")
             lsof_cmd = ["lsof", primary_disk]
-            # Use backend._run_command as lsof likely needs root if run directly on device file
             lsof_success, lsof_err, lsof_stdout = backend._run_command(lsof_cmd, f"Check Processes on {primary_disk}", timeout=15)
 
-            # lsof usually exits 0 if it finds something, 1 if it doesn't.
-            # We consider *any* stdout as an indication of busy resources.
-            # We also need to handle cases where lsof command itself fails (e.g., not found).
-            if lsof_stdout: # Check if stdout has *any* content
+            # New Logic: Fail ONLY if stdout is not empty. Ignore stderr warnings/exit code 1.
+            if lsof_stdout:
                 err_msg = f"Device {primary_disk} is still busy. Processes found by lsof:\n{lsof_stdout}"
                 print(f"ERROR: {err_msg}")
                 self.installation_error = err_msg
                 return False # Device is busy
-            elif not lsof_success and "Cannot run program" not in lsof_err and "Command not found" not in lsof_err:
-                # lsof command failed for a reason other than not finding files (e.g., permissions?)
-                # Or if lsof wasn't found at all (pkexec error might indicate this too)
-                err_msg = f"Could not reliably check if {primary_disk} is busy using lsof. Error: {lsof_err}"
-                print(f"Warning: {err_msg}")
-                # Decide whether to proceed cautiously or fail? Let's fail for safety.
-                self.installation_error = err_msg + " (Proceeding might lead to errors)"
-                # return False # Option to fail hard
-                print("Proceeding cautiously despite lsof check issue...")
+            elif not lsof_success and ("Cannot run program" in lsof_err or "Command not found" in lsof_err):
+                # Handle case where lsof command itself is missing
+                 print(f"Warning: lsof command not found or failed to execute. Cannot verify device is free. Error: {lsof_err}")
+                 # Proceed cautiously as before, or fail hard? Let's keep cautious.
+                 print("Proceeding cautiously despite missing lsof check...")
             else:
-                # lsof ran successfully and produced no output, or failed because it found nothing (exit code 1 often), or lsof not found. Good to proceed.
-                 print(f"  lsof check passed: No processes found holding {primary_disk} open (or lsof not found/applicable). Proceeding with wipefs.")
-
+                # lsof ran (even if exit code != 0 or stderr had warnings) and stdout was empty.
+                print(f"  lsof check passed: No processes found holding {primary_disk} open.")
+                # Any actual error from lsof_err was likely printed by _run_command already
+                
             self._update_progress_text("Pre-mount and process checks complete.", 0.04)
 
         # --- Execute Main Storage Actions ---
@@ -235,10 +246,17 @@ class ProgressPage(Gtk.Box):
                 return False
                 
             self._update_progress_text("Preparing storage devices...", 0.05)
+            
             # Execute Partitioning/Formatting Commands
             for i, cmd_list in enumerate(commands):
                 cmd_name = cmd_list[0]
                 progress_fraction = 0.1 + (0.15 * (i / len(commands)))
+                
+                # Add specific delay before wipefs
+                if cmd_name == "wipefs" and primary_disk and primary_disk in cmd_list:
+                     print(f"Adding 3 second delay before executing {cmd_name} on {primary_disk}...")
+                     time.sleep(3)
+                     
                 # Use the backend runner (handles pkexec)
                 success, err, _ = backend._run_command(cmd_list, f"Storage Step: {cmd_name}", self._update_progress_text, timeout=60)
                 if not success:
