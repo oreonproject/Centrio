@@ -14,16 +14,17 @@ from .base import BaseConfigurationPage
 
 class NetworkPage(BaseConfigurationPage):
     def __init__(self, main_window, overlay_widget, **kwargs):
-        super().__init__(title="Network &amp; Hostname", subtitle="Configure hostname", main_window=main_window, overlay_widget=overlay_widget, **kwargs)
+        super().__init__(title="Network &amp; Hostname", subtitle="Configure hostname for the installed system", main_window=main_window, overlay_widget=overlay_widget, **kwargs)
         # No D-Bus proxy needed
         # self.network_proxy = None 
-        self.current_hostname = "localhost.localdomain" # Default
+        self.default_hostname = "Centrio" # Define default
 
         # --- UI Setup --- 
         net_group = Adw.PreferencesGroup()
         self.add(net_group)
-        self.hostname_row = Adw.EntryRow(title="Hostname")
-        self.hostname_row.set_text(self.current_hostname) # Set default initially
+        self.hostname_row = Adw.EntryRow(title="Target Hostname")
+        # Initialize with default
+        self.hostname_row.set_text(self.default_hostname) 
         net_group.add(self.hostname_row)
         
         # Keep network config placeholder for now
@@ -35,98 +36,75 @@ class NetworkPage(BaseConfigurationPage):
         # --- Confirmation Button --- 
         button_group = Adw.PreferencesGroup()
         self.add(button_group)
-        self.complete_button = Gtk.Button(label="Apply Hostname")
+        # Changed button label to reflect saving, not immediate application
+        self.complete_button = Gtk.Button(label="Confirm Hostname") 
         self.complete_button.set_halign(Gtk.Align.CENTER)
         self.complete_button.set_margin_top(24)
         self.complete_button.add_css_class("suggested-action")
-        self.complete_button.connect("clicked", self.apply_settings_and_return)
+        self.complete_button.connect("clicked", self.save_settings_and_return) # Renamed handler
         # Enable by default, disable on error during fetch/apply
         self.complete_button.set_sensitive(True)
         self.hostname_row.set_sensitive(True)
         button_group.add(self.complete_button)
 
-        # --- Fetch Data --- 
-        self.connect_and_fetch_data()
+        # --- Fetch Configured Data --- 
+        self.fetch_configured_data()
         
-    def connect_and_fetch_data(self):
-        """Fetches the current hostname using socket."""
-        print("Fetching current hostname using socket...")
+    def fetch_configured_data(self):
+        """Fetches the previously configured hostname from ConfigManager."""
+        print("Fetching configured hostname from ConfigManager...")
         try:
-            # Get the standard hostname
-            self.current_hostname = socket.gethostname()
-            # For display, often the fully qualified name is preferred if available
-            # Try getting FQDN, fallback to standard hostname
-            try:
-                fqdn = socket.getfqdn()
-                if fqdn and "." in fqdn: # Basic check if it looks like FQDN
-                    self.current_hostname = fqdn
-            except socket.gaierror:
-                pass # Ignore if FQDN lookup fails
+            network_config = self.main_window.config_manager.get_section('network')
+            configured_hostname = network_config.get('hostname')
+            
+            if configured_hostname: # Check if a valid hostname was retrieved
+                print(f"Found configured hostname: {configured_hostname}")
+                self.hostname_row.set_text(configured_hostname)
+            else:
+                print(f"No configured hostname found, using default: {self.default_hostname}")
+                # Ensure default is set if config is empty/None
+                self.hostname_row.set_text(self.default_hostname)
 
-            print(f"Fetched Hostname: {self.current_hostname}")
-            self.hostname_row.set_text(self.current_hostname)
             self.hostname_row.set_sensitive(True)
             self.complete_button.set_sensitive(True)
             
         except Exception as e:
-            print(f"ERROR: Failed to get hostname: {e}")
-            self.show_toast(f"Failed to retrieve current hostname: {e}")
-            # Keep default, disable UI elements
-            self.hostname_row.set_text(self.current_hostname) # Show the default
-            self.hostname_row.set_sensitive(False)
-            self.complete_button.set_sensitive(False)
+            print(f"ERROR: Failed to get configured hostname from ConfigManager: {e}")
+            self.show_toast(f"Failed to retrieve configured hostname: {e}")
+            # Keep default, disable UI elements?
+            self.hostname_row.set_text(self.default_hostname) # Show the default
+            # Decide if disabling is appropriate here
+            # self.hostname_row.set_sensitive(False)
+            # self.complete_button.set_sensitive(False)
 
-    def apply_settings_and_return(self, button):
-        """Applies the hostname using hostnamectl."""
+    # Renamed function to reflect action
+    def save_settings_and_return(self, button): 
+        """Validates and saves the hostname to ConfigManager."""
         hostname = self.hostname_row.get_text().strip()
         if not hostname:
              self.show_toast("Hostname cannot be empty.")
              return
         
-        # Basic validation: prevent setting purely numeric hostname, etc.
-        # A more robust check would use regex or a library.
-        if hostname.isdigit() or len(hostname) > 63 or not hostname.replace('.','').isalnum():
-             self.show_toast("Invalid hostname format.")
-             return
+        # Basic validation (keep existing checks)
+        if hostname.isdigit() or len(hostname) > 63 or not hostname.replace('.','').replace('-','').isalnum(): # Allow hyphens
+             # Refined check for common hostname rules (simple version)
+             # - Max 63 chars per label (not checked here fully)
+             # - Max 253 total chars (not checked)
+             # - Start/End with letter/digit
+             # - Contain only letters, digits, hyphens
+             # - Cannot be all numeric
+             import re
+             if not re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?))*$", hostname) or hostname.isdigit():
+                  self.show_toast("Invalid hostname format. Use letters, numbers, hyphens. Max 63 chars.")
+                  return
              
-        print(f"Attempting to set hostname to '{hostname}' using hostnamectl...")
-        self.complete_button.set_sensitive(False) # Disable during operation
-        self.hostname_row.set_sensitive(False)
+        print(f"Saving hostname '{hostname}' to configuration...")
+        # No direct action here, just save to config
+        config_values = {"hostname": hostname}
+        # Update the config manager immediately
+        self.main_window.config_manager.update_section("network", config_values)
+        print("Hostname configuration saved.")
+        self.show_toast(f"Hostname '{hostname}' confirmed.")
         
-        cmd = ["hostnamectl", "set-hostname", hostname]
-        
-        try:
-            # Run hostnamectl set-hostname
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
-            print(f"hostnamectl output: {result.stdout}")
-            print(f"Hostname set successfully to {hostname}")
-            self.show_toast(f"Hostname set to '{hostname}' successfully!")
-            # Pass the applied hostname back
-            config_values = {"hostname": hostname}
-            super().mark_complete_and_return(button, config_values=config_values)
-            
-        except FileNotFoundError:
-            print("ERROR: hostnamectl command not found.")
-            self.show_toast("Error: hostnamectl command not found. Cannot set hostname.")
-            # Re-enable UI on error
-            self.hostname_row.set_sensitive(True)
-            self.complete_button.set_sensitive(True) 
-        except subprocess.CalledProcessError as e:
-            print(f"ERROR: hostnamectl set-hostname failed (Exit code: {e.returncode}):")
-            print(f"Stderr: {e.stderr}")
-            print(f"Stdout: {e.stdout}")
-            # Try to show a more specific error if possible
-            error_msg = e.stderr.strip() or f"hostnamectl failed with exit code {e.returncode}"
-            self.show_toast(f"Error setting hostname: {error_msg}")
-            self.hostname_row.set_sensitive(True)
-            self.complete_button.set_sensitive(True) 
-        except subprocess.TimeoutExpired:
-            print("ERROR: hostnamectl command timed out.")
-            self.show_toast("Setting hostname timed out.")
-            self.hostname_row.set_sensitive(True)
-            self.complete_button.set_sensitive(True) 
-        except Exception as e:
-            print(f"ERROR: Unexpected error setting hostname: {e}")
-            self.show_toast(f"An unexpected error occurred while setting hostname.")
-            self.hostname_row.set_sensitive(True)
-            self.complete_button.set_sensitive(True) 
+        # Mark complete and return (passing saved values)
+        super().mark_complete_and_return(button, config_values=config_values) 

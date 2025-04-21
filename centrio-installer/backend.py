@@ -100,18 +100,24 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
     Requires manual mounting/unmounting of /proc, /sys, /dev, /dev/pts, and /etc/resolv.conf.
     Assumes the caller (_run_command) handles root privileges.
     """
+    host_dbus_socket = "/run/dbus/system_bus_socket"
+    target_dbus_socket = os.path.join(target_root, host_dbus_socket.lstrip('/'))
+    
     mount_points = {
         "proc": os.path.join(target_root, "proc"),
         "sys": os.path.join(target_root, "sys"),
         "dev": os.path.join(target_root, "dev"),
         "dev/pts": os.path.join(target_root, "dev/pts"),
-        "resolv.conf": os.path.join(target_root, "etc/resolv.conf")
+        "resolv.conf": os.path.join(target_root, "etc/resolv.conf"),
+        "dbus": target_dbus_socket # Add dbus socket target
     }
     mounted_paths = set()
     
     try:
-        # --- Mount API filesystems and resolv.conf --- 
+        # --- Mount API filesystems, resolv.conf, and D-Bus socket --- 
         print(f"Setting up chroot environment in {target_root}...")
+        
+        # Prepare target directories/files first
         if not os.path.exists(mount_points["resolv.conf"]):
             # Ensure target /etc/resolv.conf exists or can be created
             try:
@@ -121,20 +127,46 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
             except OSError as e:
                  raise RuntimeError(f"Failed to prepare target resolv.conf {mount_points['resolv.conf']}: {e}") from e
                  
+        if os.path.exists(host_dbus_socket):
+             try:
+                 os.makedirs(os.path.dirname(mount_points["dbus"]), exist_ok=True)
+                 # Create an empty file for the socket bind mount target?
+                 # Or maybe just mount the socket file directly? Mount requires dir for source/target usually?
+                 # Let's try mounting the socket file directly using --bind.
+             except OSError as e:
+                 raise RuntimeError(f"Failed to prepare target D-Bus directory {os.path.dirname(mount_points['dbus'])}: {e}") from e
+        else:
+             print(f"Warning: Host D-Bus socket {host_dbus_socket} not found. Services inside chroot might fail.")
+
         mount_commands = [
-            # Type      Source                 Target                                   Options
             ("proc",    "proc",                mount_points["proc"],                 ["-t", "proc", "nodev,noexec,nosuid"]), 
             ("sysfs",   "sys",                 mount_points["sys"],                  ["-t", "sysfs", "nodev,noexec,nosuid"]), 
             ("devtmpfs","udev",               mount_points["dev"],                  ["-t", "devtmpfs", "mode=0755,nosuid"]), 
             ("devpts",  "devpts",              mount_points["dev/pts"],              ["-t", "devpts", "mode=0620,gid=5,nosuid,noexec"]), 
-            ("bind",    "/etc/resolv.conf",    mount_points["resolv.conf"],         ["--bind"])
+            ("bind",    "/etc/resolv.conf",    mount_points["resolv.conf"],         ["--bind"]),
+            # Add D-Bus socket mount if host socket exists
+            ("bind",    host_dbus_socket,      mount_points["dbus"],               ["--bind"])
         ]
 
         for name, source, target, options in mount_commands:
+            # Skip D-Bus mount if source doesn't exist
+            if name == "bind" and source == host_dbus_socket and not os.path.exists(host_dbus_socket):
+                 print(f"  Skipping D-Bus socket mount (source {host_dbus_socket} not found).")
+                 continue
+                 
             try:
-                os.makedirs(target, exist_ok=True) # Ensure mount target dir exists
+                # Ensure target dir exists for non-file bind mounts
+                if name != "bind" or source != host_dbus_socket:
+                     os.makedirs(target, exist_ok=True)
+                # For the dbus socket bind mount, the target *file* path was created above
+                # We just need the directory for it.
+                elif name == "bind" and source == host_dbus_socket:
+                     os.makedirs(os.path.dirname(target), exist_ok=True)
+                     # Create empty file as mount target if it doesn't exist? Bind mount needs a target.
+                     if not os.path.exists(target):
+                         open(target, 'a').close() 
+                          
                 mount_cmd = ["mount"] + options + [source, target]
-                # Run mount directly (we assume _run_command ensured root if needed)
                 print(f"  Mounting {source} -> {target} ({name})")
                 result = subprocess.run(mount_cmd, check=True, capture_output=True, text=True, timeout=15)
                 mounted_paths.add(target)
@@ -142,9 +174,8 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
                  raise RuntimeError("Mount command failed: 'mount' executable not found.")
             except subprocess.CalledProcessError as e:
                 # Check if already mounted (exit code 32 often means this)
-                if e.returncode == 32 and ("already mounted" in e.stderr or "mount point does not exist" in e.stderr):
-                    print(f"    Warning: Mount for {target} possibly already exists or target missing? {e.stderr.strip()}")
-                    # Add to mounted_paths so we attempt unmount later anyway
+                if e.returncode == 32 and ("already mounted" in e.stderr or "mount point does not exist" in e.stderr or "Not a directory" in e.stderr): # Added check for dbus socket
+                    print(f"    Warning: Mount for {target} possibly already exists or target invalid? {e.stderr.strip()}")
                     mounted_paths.add(target) 
                 else:
                     raise RuntimeError(f"Failed to mount {source} to {target}: {e.stderr.strip()}") from e
