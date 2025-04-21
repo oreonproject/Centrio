@@ -6,6 +6,7 @@ import os         # For creating directories
 import shlex      # For logging commands safely
 import threading  # For running install in background
 import time       # For small delays maybe
+import shutil     # For copying resolv.conf
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib
@@ -650,6 +651,10 @@ class ProgressPage(Gtk.Box):
                 # --- Add explicit /etc check+create after package install ---
                 if func == self._install_packages and step_success:
                     etc_path = os.path.join(self.target_root, "etc")
+                    resolv_conf_target = os.path.join(etc_path, "resolv.conf")
+                    host_resolv_conf = "/etc/resolv.conf"
+                    
+                    # Ensure /etc exists
                     if not os.path.exists(etc_path):
                         print(f"Warning: {etc_path} not found after package install. Creating it...")
                         try:
@@ -659,6 +664,20 @@ class ProgressPage(Gtk.Box):
                             print(f"ERROR: Failed to create {etc_path}: {e}")
                             self.installation_error = f"Failed to create essential directory {etc_path}: {e}"
                             step_success = False # Mark step as failed
+                    
+                    # Copy host resolv.conf if /etc creation succeeded
+                    if step_success and os.path.exists(host_resolv_conf):
+                        print(f"Copying {host_resolv_conf} to {resolv_conf_target}...")
+                        try:
+                            shutil.copy2(host_resolv_conf, resolv_conf_target)
+                            print(f"Successfully copied resolv.conf.")
+                        except Exception as copy_e:
+                            # Log warning but don't necessarily fail the whole install?
+                            # Chroot might still work for some things without network.
+                            print(f"Warning: Failed to copy {host_resolv_conf} to {resolv_conf_target}: {copy_e}")
+                    elif step_success and not os.path.exists(host_resolv_conf):
+                         print(f"Warning: Host {host_resolv_conf} not found. Cannot copy to target.")
+                         
                 # ---------------------------------------------------------
                 
                 if not step_success:
