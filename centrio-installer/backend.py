@@ -7,6 +7,7 @@ import re # For parsing os-release
 from .utils import get_os_release_info
 import errno # For checking mount errors
 import time   # For delays
+import shutil # For copying bootloader files
 
 def _run_command(command_list, description, progress_callback=None, timeout=None, pipe_input=None):
     """Runs a command, using pkexec if not already root, captures output, handles errors.
@@ -648,83 +649,98 @@ def enable_network_manager(target_root, progress_callback=None):
 # --- Bootloader Installation ---
 
 def install_bootloader_in_container(target_root, primary_disk, efi_partition_device, progress_callback=None):
-    """Installs GRUB2 bootloader via chroot."""
+    """Installs GRUB2 bootloader.
+    For UEFI, copies shim/grub manually and uses efibootmgr.
+    For BIOS, uses grub2-install.
+    """
     
     # Detect if system is likely UEFI (check for /sys/firmware/efi)
     is_uefi = os.path.exists("/sys/firmware/efi")
-    grub_target_disk = primary_disk # Install MBR/GPT stage 1 to disk
+    grub_target_disk = primary_disk # Needed for BIOS install
     
     if is_uefi:
-        print("UEFI system detected, installing GRUB for EFI.")
-        # Install GRUB EFI binaries and register with firmware
-        # Assumes /boot/efi is mounted at target_root/boot/efi
-        grub_install_cmd = [
-            "grub2-install", 
-            "--target=x86_64-efi",
-            "--efi-directory=/boot/efi", # Relative to target_root inside container
-            "--bootloader-id=Centrio",   # Boot menu entry name
-            "--recheck",
-            "--removable"                # Use standard path + shim
-            # No disk device needed for pure UEFI install
-        ]
-    else:
-        print("BIOS system detected, installing GRUB for BIOS.")
+        print("UEFI system detected. Manually setting up GRUB+Shim for Secure Boot compatibility.")
+        if not efi_partition_device:
+             return False, "UEFI system detected but EFI partition path not provided.", None
+             
+        efi_mount_point = os.path.join(target_root, "boot/efi")
+        boot_target_dir = os.path.join(efi_mount_point, "EFI/BOOT")
+        shim_target_path = os.path.join(boot_target_dir, "BOOTX64.EFI") # Shim takes the default boot path
+        grub_target_path = os.path.join(boot_target_dir, "grubx64.efi") # GRUB loaded by Shim
+        
+        # Define source paths within the installed system (target_root)
+        # Paths might vary slightly based on distro version, adjust if needed
+        shim_source_path = os.path.join(target_root, "usr/share/shim/x64/shimx64.efi") 
+        grub_source_path = os.path.join(target_root, "usr/lib/grub/x86_64-efi/grubx64.efi")
+        
+        try:
+            # 1. Create target directory
+            print(f"  Creating EFI boot directory: {boot_target_dir}...")
+            os.makedirs(boot_target_dir, exist_ok=True)
+            
+            # 2. Copy Shim (as BOOTX64.EFI)
+            if not os.path.exists(shim_source_path):
+                 return False, f"Shim source file not found at {shim_source_path}. Ensure shim-x64 is installed.", None
+            print(f"  Copying {shim_source_path} -> {shim_target_path}...")
+            shutil.copy2(shim_source_path, shim_target_path)
+            
+            # 3. Copy GRUB (as grubx64.efi)
+            if not os.path.exists(grub_source_path):
+                 return False, f"GRUB EFI source file not found at {grub_source_path}. Ensure grub2-efi-x64 is installed.", None
+            print(f"  Copying {grub_source_path} -> {grub_target_path}...")
+            shutil.copy2(grub_source_path, grub_target_path)
+            
+        except Exception as e:
+            err_msg = f"Failed during manual copy of EFI files: {e}"
+            print(f"ERROR: {err_msg}")
+            return False, err_msg, None
+            
+        # 4. Run efibootmgr to register Shim
+        print(f"Attempting to register boot entry using efibootmgr for {efi_partition_device}...")
+        # Derive disk and partition number from efi_partition_device
+        match = re.match(r"(/dev/[a-zA-Z]+)(\d+)", efi_partition_device) or \
+                re.match(r"(/dev/nvme\d+n\d+)p(\d+)", efi_partition_device)
+        
+        if match:
+            efi_disk = match.group(1)
+            efi_part_num = match.group(2)
+            loader_path = "\\EFI\\BOOT\\BOOTX64.EFI" # Path to Shim
+            
+            efibootmgr_cmd = [
+                "efibootmgr", "-c", 
+                "-d", efi_disk, "-p", efi_part_num,
+                "-L", "Centrio", "-l", loader_path
+            ]
+            
+            # Run efibootmgr inside chroot
+            efibm_success, efibm_err, _ = _run_in_chroot(target_root, efibootmgr_cmd, "Register EFI Boot Entry", progress_callback, timeout=60)
+            if not efibm_success:
+                print(f"Warning: efibootmgr failed to create boot entry: {efibm_err}")
+                # Continue anyway, manual boot entry might be needed but installation can proceed
+            else:
+                print("Successfully registered boot entry with efibootmgr.")
+        else:
+            print(f"Warning: Could not parse disk/partition from {efi_partition_device}. Cannot run efibootmgr.")
+
+    else: # BIOS System
+        print("BIOS system detected, installing GRUB for BIOS using grub2-install.")
         # Install GRUB BIOS boot sector
         grub_install_cmd = [
             "grub2-install", 
             "--target=i386-pc", 
             grub_target_disk # Install to the disk MBR/boot sector
         ]
+        # Run grub2-install for BIOS
+        success, err, _ = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB (BIOS)", progress_callback, timeout=120)
+        if not success: return False, err, None
 
-    # --- Run grub2-install --- 
-    success, err, _ = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB", progress_callback, timeout=120)
-    if not success: return False, err, None
-    
-    # --- Run efibootmgr for UEFI --- 
-    if is_uefi:
-        if not efi_partition_device:
-            print("Warning: UEFI system detected but EFI partition device path not provided. Cannot run efibootmgr.")
-            # Decide if this is fatal? Maybe grub2-install alone worked?
-            # Let's proceed but log warning.
-        else:
-            print(f"Attempting to register boot entry using efibootmgr for {efi_partition_device}...")
-            # Derive disk and partition number from efi_partition_device
-            # Assumes format like /dev/sda1, /dev/nvme0n1p1
-            match = re.match(r"(/dev/[a-zA-Z]+)(\d+)", efi_partition_device) or \
-                    re.match(r"(/dev/nvme\d+n\d+)p(\d+)", efi_partition_device)
-            
-            if match:
-                efi_disk = match.group(1)
-                efi_part_num = match.group(2)
-                # Boot loader path for --removable is standard EFI/BOOT/BOOTX64.EFI
-                # Need backslashes for UEFI path
-                loader_path = "\\EFI\\BOOT\\BOOTX64.EFI"
-                
-                efibootmgr_cmd = [
-                    "efibootmgr",
-                    "-c",                     # Create new entry
-                    "-d", efi_disk,           # Disk containing EFI partition
-                    "-p", efi_part_num,       # EFI partition number
-                    "-L", "Centrio",          # Boot entry label
-                    "-l", loader_path         # Path to the EFI loader file
-                ]
-                
-                # Run efibootmgr inside chroot
-                efibm_success, efibm_err, _ = _run_in_chroot(target_root, efibootmgr_cmd, "Register EFI Boot Entry", progress_callback, timeout=60)
-                if not efibm_success:
-                    # Don't fail installation, but log a clear warning
-                    print(f"Warning: efibootmgr failed to create boot entry: {efibm_err}")
-                else:
-                    print("Successfully registered boot entry with efibootmgr.")
-            else:
-                print(f"Warning: Could not parse disk and partition number from EFI device {efi_partition_device}. Cannot run efibootmgr.")
-
-    # --- Generate GRUB config (Common) --- 
-    # Ensure /boot is mounted correctly within the container context
+    # --- Generate GRUB config (Common to UEFI and BIOS) --- 
+    print("Generating GRUB configuration file (grub.cfg)...")
     grub_mkconfig_cmd = ["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"]
     success, err, _ = _run_in_chroot(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
     if not success: return False, err, None
 
+    print("Bootloader configuration steps completed.")
     return True, "", None 
 
 # --- Service Management Helpers --- 
