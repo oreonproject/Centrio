@@ -663,7 +663,8 @@ def install_bootloader_in_container(target_root, primary_disk, progress_callback
             "--target=x86_64-efi",
             "--efi-directory=/boot/efi", # Relative to target_root inside container
             "--bootloader-id=Centrio",   # Boot menu entry name
-            "--recheck"
+            "--recheck",
+            "--removable"                # Use standard path + shim
             # No disk device needed for pure UEFI install
         ]
     else:
