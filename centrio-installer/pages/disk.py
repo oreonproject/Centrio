@@ -4,6 +4,7 @@ import gi
 import subprocess # For running lsblk
 import json       # For parsing lsblk output
 import shlex      # For safe command string generation
+import os         # For path manipulation
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib
@@ -78,6 +79,51 @@ def generate_mkfs_commands(disk_path, partition_prefix=""):
     
     return commands
 
+# --- Helper Functions to Check Host Usage ---
+
+def get_host_mounts():
+    """Gets currently mounted filesystems on the host."""
+    mounts = {}
+    try:
+        # Use findmnt for reliable mount info, JSON output
+        cmd = ["findmnt", "-J", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
+        mount_data = json.loads(result.stdout)
+        if "filesystems" in mount_data:
+            for fs in mount_data["filesystems"]:
+                source = fs.get("source")
+                target = fs.get("target")
+                if source and target:
+                    # Store source device (e.g., /dev/sda1, /dev/mapper/vg-lv)
+                    mounts[target] = source 
+        print(f"Detected host mounts: {mounts}") # Log detected mounts
+        return mounts
+    except Exception as e:
+        print(f"Warning: Failed to get host mounts using findmnt: {e}")
+        return {}
+
+def get_host_lvm_pvs():
+    """Gets active LVM Physical Volumes on the host."""
+    pvs = set()
+    try:
+        # Get PV names
+        cmd = ["pvs", "--noheadings", "-o", "pv_name"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
+        for line in result.stdout.splitlines():
+            pv_name = line.strip()
+            if pv_name:
+                # Resolve device path if it's a symlink (e.g., /dev/dm-*)
+                try:
+                    real_path = os.path.realpath(pv_name)
+                    pvs.add(real_path)
+                except Exception:
+                    pvs.add(pv_name) # Add original if realpath fails
+        print(f"Detected host LVM PVs: {pvs}") # Log detected PVs
+        return pvs
+    except Exception as e:
+        print(f"Warning: Failed to get host LVM PVs: {e}")
+        return set()
+
 class DiskPage(BaseConfigurationPage):
     def __init__(self, main_window, overlay_widget, **kwargs):
         super().__init__(title="Installation Destination", subtitle="Select disks and configure partitioning", main_window=main_window, overlay_widget=overlay_widget, **kwargs)
@@ -88,6 +134,8 @@ class DiskPage(BaseConfigurationPage):
         self.scan_completed = False
         self.partitioning_method = None # "AUTOMATIC" or "MANUAL" or None
         self.disk_widgets = {} # Map path to row/check widgets
+        self.host_mounts = {} # Store host mount info
+        self.host_pvs = set()   # Store host LVM PV info
         
         # --- Add Initial Widgets --- 
         info_group = Adw.PreferencesGroup()
@@ -156,7 +204,7 @@ class DiskPage(BaseConfigurationPage):
          pass 
 
     def scan_for_disks(self, button):
-        """Runs lsblk to find disks and updates the UI."""
+        """Runs lsblk to find disks, checks host usage, and updates the UI."""
         print("Scanning for disks using lsblk...")
         button.set_sensitive(False) 
         self.show_toast("Scanning for storage devices...")
@@ -175,28 +223,77 @@ class DiskPage(BaseConfigurationPage):
         self.auto_part_check.set_active(False)
         self.manual_part_check.set_active(False)
 
+        # --- Get Host Usage Info ---
+        self.host_mounts = get_host_mounts()
+        self.host_pvs = get_host_lvm_pvs()
+        # --- End Host Usage Info ---
+
         try:
             # Run lsblk, request JSON output (-J), sizes in bytes (-b), specific columns
-            cmd = ["lsblk", "-J", "-b", "-o", "NAME,SIZE,MODEL,TYPE,PATH"]
+            # Add PKNAME to get parent device name for checking partitions
+            cmd = ["lsblk", "-J", "-b", "-p", "-o", "NAME,PATH,SIZE,MODEL,TYPE,PKNAME"] # Added -p, PKNAME
             result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
             lsblk_data = json.loads(result.stdout)
             
             self.detected_disks = []
+            
+            # Helper to check if a device or its partitions are used by the host
+            def is_device_used_by_host(device_path):
+                 # Check if device itself is a host LVM PV
+                 if device_path in self.host_pvs:
+                      print(f"  Device {device_path} is a host LVM PV.")
+                      return True
+                 # Check if device itself is a source for a host mount
+                 if device_path in self.host_mounts.values():
+                      print(f"  Device {device_path} is directly mounted by host.")
+                      return True
+                      
+                 # Check partitions of the device
+                 try:
+                     # Run lsblk again just for this device's children
+                     part_cmd = ["lsblk", "-J", "-b", "-p", "-o", "PATH,TYPE", device_path]
+                     part_result = subprocess.run(part_cmd, capture_output=True, text=True, check=False, timeout=5)
+                     if part_result.returncode == 0:
+                         part_data = json.loads(part_result.stdout)
+                         if "blockdevices" in part_data and len(part_data["blockdevices"]) > 0:
+                              # Check children recursively (usually just one level needed for partitions)
+                              children = part_data["blockdevices"][0].get("children", [])
+                              for child in children:
+                                   child_path = child.get("path")
+                                   if not child_path: continue
+                                   # Check if partition is a host LVM PV
+                                   if child_path in self.host_pvs:
+                                        print(f"  Partition {child_path} is a host LVM PV.")
+                                        return True
+                                   # Check if partition is a source for a host mount
+                                   if child_path in self.host_mounts.values():
+                                        print(f"  Partition {child_path} is mounted by host.")
+                                        return True
+                 except Exception as e:
+                      print(f"  Warning: Failed to check partitions of {device_path} for host usage: {e}")
+                      
+                 return False # Not found in mounts or PVs
+
             if "blockdevices" in lsblk_data:
                 for device in lsblk_data["blockdevices"]:
-                    # Filter for devices of type 'disk' (ignore partitions, lvm, etc.)
-                    # Also ignore cd/dvd drives (usually model contains CD/DVD)
+                    # Filter for devices of type 'disk'
                     if device.get("type") == "disk" and not any(s in (device.get("model") or "").upper() for s in ["CD", "DVD"]):
+                        disk_path = device.get("path") 
+                        if not disk_path: continue # Skip if no path
+
+                        is_host_disk = is_device_used_by_host(disk_path)
+                        
                         disk_info = {
                             "name": device.get("name", "N/A"),
-                            "path": device.get("path", "/dev/" + device.get("name", "")), # Construct path if missing
-                            "size": device.get("size"), # Keep as int (bytes) or None
-                            "model": device.get("model", "Unknown Model").strip()
+                            "path": disk_path, 
+                            "size": device.get("size"), 
+                            "model": device.get("model", "Unknown Model").strip(),
+                            "is_host_disk": is_host_disk # Store host usage flag
                         }
                         self.detected_disks.append(disk_info)
             
-            print(f"Detected disks: {self.detected_disks}")
-            self.update_disk_list_ui()
+            print(f"Detected disks (including host usage check): {self.detected_disks}")
+            self.update_disk_list_ui() # Update UI with host usage info
             self.scan_completed = True
             self.show_toast(f"Scan complete. Found {len(self.detected_disks)} disk(s).")
             # Show groups now that scan is done
@@ -206,7 +303,6 @@ class DiskPage(BaseConfigurationPage):
                 self.part_group.set_visible(True)
             else:
                  self.show_toast("No suitable disks found for installation.")
-                 # Maybe show an error message in the group?
 
         except FileNotFoundError:
             print("ERROR: lsblk command not found.")
@@ -227,12 +323,12 @@ class DiskPage(BaseConfigurationPage):
         finally:
             # Re-enable scan button regardless of outcome
             button.set_sensitive(True)
-            # Update confirmation button state based on scan results
+            # Update confirmation button state based on scan results AND host usage
             self.update_complete_button_state()
             
     def update_disk_list_ui(self):
-        """Populates the disk list UI based on self.detected_disks."""
-        # Clear previous items (redundant check, but safe)
+        """Populates the disk list UI, marking host disks as unusable."""
+        # Clear previous items
         while child := self.disk_list_box.get_row_at_index(0):
              self.disk_list_box.remove(child)
         self.disk_widgets = {}
@@ -244,6 +340,7 @@ class DiskPage(BaseConfigurationPage):
             self.disk_list_box.append(row)
             return
 
+        found_usable_disk = False
         for disk in self.detected_disks:
             disk_path = disk["path"]
             disk_size_str = format_bytes(disk["size"])
@@ -253,20 +350,42 @@ class DiskPage(BaseConfigurationPage):
             row = Adw.ActionRow(title=title, subtitle=subtitle)
             check = Gtk.CheckButton()
             check.set_valign(Gtk.Align.CENTER)
-            check.connect("toggled", self.on_disk_toggled, disk_path)
-            row.add_suffix(check)
-            row.set_activatable_widget(check)
-            self.disk_list_box.append(row)
-            self.disk_widgets[disk_path] = {"row": row, "check": check}
             
+            if disk["is_host_disk"]:
+                 row.set_subtitle(subtitle + " (In use by host OS - Cannot select)")
+                 row.set_sensitive(False) # Disable the whole row
+                 check.set_sensitive(False)
+                 # Do not connect signal or add to activatable widgets
+            else:
+                 found_usable_disk = True
+                 check.connect("toggled", self.on_disk_toggled, disk_path)
+                 row.add_suffix(check)
+                 row.set_activatable_widget(check)
+
+            self.disk_list_box.append(row)
+            # Store widgets even if disabled, for completeness
+            self.disk_widgets[disk_path] = {"row": row, "check": check} 
+            
+        if not found_usable_disk:
+             # Optionally add a specific message if only host disks were found
+             print("Warning: Only disks currently used by the host OS were detected.")
+             # Consider adding a label to the UI group indicating this.
+             
     def on_disk_toggled(self, check_button, disk_path):
         """Handle checkbox toggle for disk selection."""
-        if check_button.get_active():
-            self.selected_disks.add(disk_path)
-            print(f"Disk selected: {disk_path}")
+        # Extra check: Ensure the toggled disk is not a host disk (shouldn't happen if UI is correct)
+        if disk_path in self.disk_widgets and self.disk_widgets[disk_path]["row"].get_sensitive():
+            if check_button.get_active():
+                self.selected_disks.add(disk_path)
+                print(f"Disk selected: {disk_path}")
+            else:
+                self.selected_disks.discard(disk_path)
+                print(f"Disk deselected: {disk_path}")
         else:
-            self.selected_disks.discard(disk_path)
-            print(f"Disk deselected: {disk_path}")
+             # Force inactive if a disabled row's button somehow got toggled
+             check_button.set_active(False)
+             print(f"Prevented selection of host disk: {disk_path}")
+             
         self.update_complete_button_state()
 
     def on_partitioning_method_toggled(self, button):
@@ -285,9 +404,15 @@ class DiskPage(BaseConfigurationPage):
 
     def update_complete_button_state(self):
         """Enable the confirmation button only if conditions are met."""
+        # Ensure selected disks are not host disks (redundant check)
+        valid_selected_disks = {d for d in self.selected_disks if d in self.disk_widgets and self.disk_widgets[d]["row"].get_sensitive()}
+        if len(valid_selected_disks) != len(self.selected_disks):
+             print("Warning: Host disk found in selected_disks set. Correcting.")
+             self.selected_disks = valid_selected_disks # Correct the set
+             
         can_proceed = (
             self.scan_completed and 
-            len(self.selected_disks) > 0 and 
+            len(self.selected_disks) > 0 and # Check the corrected set
             self.partitioning_method is not None
         )
         self.complete_button.set_sensitive(can_proceed)
