@@ -593,7 +593,7 @@ class ProgressPage(Gtk.Box):
 
         self._update_progress_text("Installing bootloader...", 0.9)
         
-        success, err = backend.install_bootloader_in_container(
+        success, err, _ = backend.install_bootloader_in_container(
             self.target_root, 
             primary_disk, 
             progress_callback=self._update_progress_text
