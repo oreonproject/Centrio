@@ -142,6 +142,11 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
     host_efi_vars_path = "/sys/firmware/efi/efivars"
     if os.path.exists(host_efi_vars_path):
         mount_points["efivars"] = os.path.join(target_root, host_efi_vars_path.lstrip('/'))
+        
+    # Add /boot path if it exists within target_root
+    target_boot_path = os.path.join(target_root, "boot")
+    if os.path.exists(target_boot_path):
+        mount_points["boot"] = target_boot_path # Target is the same as source for bind mount
     
     try:
         # --- Mount API filesystems, resolv.conf, and D-Bus socket --- 
@@ -190,7 +195,8 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
             ("devpts",  "devpts",              mount_points["dev/pts"],     "devpts",  ["mode=0620","gid=5","nosuid","noexec"]), 
             ("bind",    host_dbus_socket,      mount_points["dbus"],        None,      ["--bind"]),
             # Conditionally add efivars mount
-            ("efivars", "efivarfs",            mount_points.get("efivars"), "efivarfs",["nosuid","noexec","nodev"]) # Source is the fstype
+            ("efivars", "efivarfs",            mount_points.get("efivars"), "efivarfs",["nosuid","noexec","nodev"]), # Source is the fstype
+            ("boot",    target_boot_path,      mount_points.get("boot"),      None,      ["--bind"])
         ]
 
         for name, source, target, fstype, options_list in mount_commands:
@@ -666,12 +672,11 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     For BIOS, uses grub2-install.
     """
     
-    # Get OS Name for Bootloader ID
-    os_info = get_os_release_info(target_root=target_root)
-    # --- Add Logging --- 
-    print(f"DEBUG: os_info read from target_root '{target_root}': {os_info}")
-    # --- End Logging ---
-    bootloader_id = os_info.get("NAME", "Centrio") # Use OS Name or fallback
+    # Get OS Name for Bootloader ID - No longer needed for label, keep for logs?
+    # os_info = get_os_release_info(target_root=target_root)
+    # print(f"DEBUG: os_info read from target_root '{target_root}': {os_info}")
+    # bootloader_id = os_info.get("NAME", "Centrio") # Use OS Name or fallback
+    bootloader_id = "Oreon" # Hardcode for reliability
     print(f"Using bootloader ID: {bootloader_id}")
     
     # Detect if system is likely UEFI (check for /sys/firmware/efi)
@@ -747,7 +752,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             efibootmgr_cmd = [
                 "efibootmgr", "-c", 
                 "-d", efi_disk, "-p", efi_part_num,
-                "-L", bootloader_id, "-l", loader_path # Use dynamic bootloader_id
+                "-L", bootloader_id, "-l", loader_path # Use hardcoded bootloader_id
             ]
             
             efibm_success, efibm_err, _ = _run_in_chroot(target_root, efibootmgr_cmd, "Register EFI Boot Entry", progress_callback, timeout=60)
@@ -772,7 +777,30 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
 
     # --- Generate GRUB config (Common to UEFI and BIOS) --- 
     print(f"Generating GRUB configuration file (grub.cfg) for {bootloader_id}...")
-    grub_mkconfig_cmd = ["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"]
+    
+    # Determine correct grub config path (/boot/grub2/ or /boot/grub/)
+    grub_cfg_path = None
+    grub2_dir_in_chroot = "/boot/grub2"
+    grub_dir_in_chroot = "/boot/grub"
+    check_path_cmd_grub2 = ["test", "-d", grub2_dir_in_chroot]
+    check_path_cmd_grub = ["test", "-d", grub_dir_in_chroot]
+    
+    # Check for /boot/grub2 first
+    success_grub2, _, _ = _run_in_chroot(target_root, check_path_cmd_grub2, f"Check for {grub2_dir_in_chroot}")
+    if success_grub2:
+        grub_cfg_path = os.path.join(grub2_dir_in_chroot, "grub.cfg")
+        print(f"  Using GRUB 2 path: {grub_cfg_path}")
+    else:
+        # Check for /boot/grub as fallback
+        success_grub, _, _ = _run_in_chroot(target_root, check_path_cmd_grub, f"Check for {grub_dir_in_chroot}")
+        if success_grub:
+            grub_cfg_path = os.path.join(grub_dir_in_chroot, "grub.cfg")
+            print(f"  Using GRUB legacy path: {grub_cfg_path}")
+        else:
+             print(f"ERROR: Neither {grub2_dir_in_chroot} nor {grub_dir_in_chroot} found in target. Cannot generate grub.cfg.")
+             return False, "Could not find GRUB directory in target /boot", None
+             
+    grub_mkconfig_cmd = ["grub2-mkconfig", "-o", grub_cfg_path]
     success, err, stdout = _run_in_chroot(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
     # Log output even on success for debugging
     print(f"grub2-mkconfig finished. Success: {success}. Stderr: {err}. Stdout: {stdout}") 
