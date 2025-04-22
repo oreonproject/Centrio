@@ -73,7 +73,6 @@ def _run_command(command_list, description, progress_callback=None, timeout=None
             print("--- Attempting to get last kernel messages (dmesg) ---")
             try:
                  # Run dmesg directly, not via _run_command to avoid loops/pkexec issues
-                 # Get last 50 lines with timestamps
                  dmesg_cmd = ["dmesg", "-T"] 
                  dmesg_process = subprocess.run(dmesg_cmd, capture_output=True, text=True, check=False, timeout=5)
                  if dmesg_process.stdout:
@@ -139,6 +138,11 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
     }
     mounted_paths = set()
     
+    # Add efivars path if host supports EFI
+    host_efi_vars_path = "/sys/firmware/efi/efivars"
+    if os.path.exists(host_efi_vars_path):
+        mount_points["efivars"] = os.path.join(target_root, host_efi_vars_path.lstrip('/'))
+    
     try:
         # --- Mount API filesystems, resolv.conf, and D-Bus socket --- 
         print(f"Setting up chroot environment in {target_root}...")
@@ -184,13 +188,20 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
             ("sysfs",   "sys",                 mount_points["sys"],         "sysfs",   ["nodev","noexec","nosuid"]), 
             ("devtmpfs","udev",               mount_points["dev"],         "devtmpfs",["mode=0755","nosuid"]), 
             ("devpts",  "devpts",              mount_points["dev/pts"],     "devpts",  ["mode=0620","gid=5","nosuid","noexec"]), 
-            ("bind",    host_dbus_socket,      mount_points["dbus"],        None,      ["--bind"])
+            ("bind",    host_dbus_socket,      mount_points["dbus"],        None,      ["--bind"]),
+            # Conditionally add efivars mount
+            ("efivars", "efivarfs",            mount_points.get("efivars"), "efivarfs",["nosuid","noexec","nodev"]) # Source is the fstype
         ]
 
         for name, source, target, fstype, options_list in mount_commands:
             # Skip D-Bus mount if source doesn't exist
             if name == "bind" and source == host_dbus_socket and not os.path.exists(host_dbus_socket):
                  print(f"  Skipping D-Bus socket mount (source {host_dbus_socket} not found).")
+                 continue
+                 
+            # Skip efivars mount if target wasn't added (host doesn't have it)
+            if name == "efivars" and not target:
+                 print(f"  Skipping efivars mount (host path {host_efi_vars_path} not found).")
                  continue
                  
             try:
@@ -655,13 +666,17 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     For BIOS, uses grub2-install.
     """
     
+    # Get OS Name for Bootloader ID
+    os_info = get_os_release_info(target_root=target_root)
+    bootloader_id = os_info.get("NAME", "Centrio") # Use OS Name or fallback
+    print(f"Using bootloader ID: {bootloader_id}")
+    
     # Detect if system is likely UEFI (check for /sys/firmware/efi)
     is_uefi = os.path.exists("/sys/firmware/efi")
     grub_target_disk = primary_disk # Needed for BIOS install
-    bootloader_id = "Centrio" # Consistent ID
     
     if is_uefi:
-        print("UEFI system detected. Setting up GRUB+Shim manually for Secure Boot.")
+        print(f"UEFI system detected. Setting up GRUB+Shim manually for Secure Boot ({bootloader_id}).")
         if not efi_partition_device:
              return False, "UEFI system detected but EFI partition path not provided.", None
              
@@ -729,7 +744,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             efibootmgr_cmd = [
                 "efibootmgr", "-c", 
                 "-d", efi_disk, "-p", efi_part_num,
-                "-L", bootloader_id, "-l", loader_path
+                "-L", bootloader_id, "-l", loader_path # Use dynamic bootloader_id
             ]
             
             efibm_success, efibm_err, _ = _run_in_chroot(target_root, efibootmgr_cmd, "Register EFI Boot Entry", progress_callback, timeout=60)
@@ -741,7 +756,9 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             print(f"Warning: Could not parse disk/partition from {efi_partition_device}. Cannot run efibootmgr.")
 
     else: # BIOS System
-        print("BIOS system detected, installing GRUB for BIOS using grub2-install.")
+        print(f"BIOS system detected, installing GRUB for BIOS using grub2-install ({bootloader_id}).")
+        # For BIOS, grub2-install doesn't use a bootloader ID directly in the MBR,
+        # but we use the variable for consistency in logs.
         grub_install_cmd = [
             "grub2-install", 
             "--target=i386-pc", 
@@ -751,9 +768,11 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         if not success: return False, err, None
 
     # --- Generate GRUB config (Common to UEFI and BIOS) --- 
-    print("Generating GRUB configuration file (grub.cfg)...")
+    print(f"Generating GRUB configuration file (grub.cfg) for {bootloader_id}...")
     grub_mkconfig_cmd = ["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"]
-    success, err, _ = _run_in_chroot(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
+    success, err, stdout = _run_in_chroot(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
+    # Log output even on success for debugging
+    print(f"grub2-mkconfig finished. Success: {success}. Stderr: {err}. Stdout: {stdout}") 
     if not success: return False, err, None
 
     print("Bootloader configuration steps completed.")

@@ -108,19 +108,28 @@ def ana_get_available_locales():
         "de_DE.UTF-8": "German (Germany)"
     } 
 
-def get_os_release_info():
-    """Parses /etc/os-release (or /usr/lib/os-release) to get NAME and VERSION_ID."""
-    info = {"NAME": "Linux", "VERSION_ID": None} # Defaults
-    release_file = None
-    # Check standard locations
-    if os.path.exists("/etc/os-release"):
-        release_file = "/etc/os-release"
-    elif os.path.exists("/usr/lib/os-release"):
-        release_file = "/usr/lib/os-release"
+from .constants import APP_ID, VERSION
+
+def get_os_release_info(target_root=None):
+    """Parses /etc/os-release (or /usr/lib/os-release) to get NAME and VERSION_ID.
+    If target_root is provided, reads from within that root.
+    """
+    info = {"NAME": "Linux", "VERSION_ID": None, "ID": None} # Defaults
+    release_file_path = None
+    base_path = target_root if target_root else "/"
     
-    if release_file:
+    # Check standard locations relative to base_path
+    etc_path = os.path.join(base_path, "etc/os-release")
+    usr_lib_path = os.path.join(base_path, "usr/lib/os-release")
+    
+    if os.path.exists(etc_path):
+        release_file_path = etc_path
+    elif os.path.exists(usr_lib_path):
+        release_file_path = usr_lib_path
+    
+    if release_file_path:
         try:
-            with open(release_file, 'r') as f:
+            with open(release_file_path, 'r') as f:
                 for line in f:
                     line = line.strip()
                     if not line or line.startswith('#'):
@@ -133,7 +142,7 @@ def get_os_release_info():
                         if key in ["NAME", "VERSION_ID", "ID"]:
                             info[key] = value
         except Exception as e:
-            print(f"Warning: Failed to parse {release_file}: {e}")
+            print(f"Warning: Failed to parse {release_file_path}: {e}")
             
     return info
 
