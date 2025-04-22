@@ -450,7 +450,8 @@ def install_packages_dnf(target_root, progress_callback=None):
     # --- Define Packages and Command --- 
     packages = [
         "@core", "kernel", "grub2-efi-x64", "grub2-pc", "efibootmgr", 
-        "grub2-efi-x64-modules", "shim-x64", # Added EFI modules and shim
+        "grub2-efi-x64-modules", 
+        "shim-x64", "shim", "shim-x86_64", # Added EFI modules and shim alternatives
         "linux-firmware", "NetworkManager", "systemd-resolved", 
         "bash-completion", "dnf-utils"
         # Add more packages as needed
@@ -674,24 +675,26 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         grub_source_path_in_chroot = None
         
         print("Searching for shimx64.efi within the target system...")
-        find_shim_cmd = ["find", "/usr", "-name", "shimx64.efi"]
+        # Search entire filesystem instead of just /usr
+        find_shim_cmd = ["find", "/", "-name", "shimx64.efi"]
         find_shim_success, find_shim_err, find_shim_stdout = _run_in_chroot(target_root, find_shim_cmd, "Find shimx64.efi")
         if find_shim_success and find_shim_stdout:
             # Take the first line found
             shim_source_path_in_chroot = find_shim_stdout.splitlines()[0].strip()
             print(f"  Found shimx64.efi at: {shim_source_path_in_chroot}")
         else:
-            return False, f"Could not find shimx64.efi within {target_root}/usr. Error: {find_shim_err}", None
+            return False, f"Could not find shimx64.efi within {target_root}. Error: {find_shim_err}", None
             
         print("Searching for grubx64.efi within the target system...")
-        find_grub_cmd = ["find", "/usr", "-name", "grubx64.efi"]
+        # Search entire filesystem instead of just /usr
+        find_grub_cmd = ["find", "/", "-name", "grubx64.efi"]
         find_grub_success, find_grub_err, find_grub_stdout = _run_in_chroot(target_root, find_grub_cmd, "Find grubx64.efi")
         if find_grub_success and find_grub_stdout:
             # Take the first line found
             grub_source_path_in_chroot = find_grub_stdout.splitlines()[0].strip()
             print(f"  Found grubx64.efi at: {grub_source_path_in_chroot}")
         else:
-            return False, f"Could not find grubx64.efi within {target_root}/usr. Error: {find_grub_err}", None
+            return False, f"Could not find grubx64.efi within {target_root}. Error: {find_grub_err}", None
             
         # Convert chroot paths to host paths for shutil
         shim_source_path_on_host = os.path.join(target_root, shim_source_path_in_chroot.lstrip('/'))
