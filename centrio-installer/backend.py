@@ -668,6 +668,9 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     
     # Get OS Name for Bootloader ID
     os_info = get_os_release_info(target_root=target_root)
+    # --- Add Logging --- 
+    print(f"DEBUG: os_info read from target_root '{target_root}': {os_info}")
+    # --- End Logging ---
     bootloader_id = os_info.get("NAME", "Centrio") # Use OS Name or fallback
     print(f"Using bootloader ID: {bootloader_id}")
     
