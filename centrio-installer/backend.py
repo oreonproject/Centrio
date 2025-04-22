@@ -650,61 +650,92 @@ def enable_network_manager(target_root, progress_callback=None):
 
 def install_bootloader_in_container(target_root, primary_disk, efi_partition_device, progress_callback=None):
     """Installs GRUB2 bootloader.
-    For UEFI, copies shim/grub manually and uses efibootmgr.
+    For UEFI, finds shim/grub in chroot, copies manually, uses efibootmgr.
     For BIOS, uses grub2-install.
     """
     
     # Detect if system is likely UEFI (check for /sys/firmware/efi)
     is_uefi = os.path.exists("/sys/firmware/efi")
     grub_target_disk = primary_disk # Needed for BIOS install
+    bootloader_id = "Centrio" # Consistent ID
     
     if is_uefi:
-        print("UEFI system detected, using grub2-install for GRUB installation.")
-        bootloader_id = "Centrio" # Define bootloader ID
-        
-        # Construct grub2-install command for UEFI
-        grub_install_cmd = [
-            "grub2-install", 
-            "--target=x86_64-efi",
-            "--efi-directory=/boot/efi", # Relative to target_root inside container
-            f"--bootloader-id={bootloader_id}"
-            # Removed --recheck and --removable for now
-        ]
-        # Run grub2-install for UEFI
-        success, err, _ = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB (UEFI)", progress_callback, timeout=120)
-        if not success: 
-             # If grub install fails, don't proceed to efibootmgr or mkconfig
-             return False, err, None
-
-        # --- Run efibootmgr to register the boot entry ---
-        print(f"Attempting to register boot entry using efibootmgr for {efi_partition_device}...")
+        print("UEFI system detected. Setting up GRUB+Shim manually for Secure Boot.")
         if not efi_partition_device:
-             print("Warning: EFI partition device path not provided. Skipping efibootmgr.")
-        else:
-             # Derive disk and partition number from efi_partition_device
-             match = re.match(r"(/dev/[a-zA-Z]+)(\d+)", efi_partition_device) or \
-                     re.match(r"(/dev/nvme\d+n\d+)p(\d+)", efi_partition_device)
+             return False, "UEFI system detected but EFI partition path not provided.", None
              
-             if match:
-                 efi_disk = match.group(1)
-                 efi_part_num = match.group(2)
-                 # Default loader path for standard grub install
-                 loader_path = f"\\EFI\\{bootloader_id}\\grubx64.efi" 
-                 
-                 efibootmgr_cmd = [
-                     "efibootmgr", "-c", 
-                     "-d", efi_disk, "-p", efi_part_num,
-                     "-L", bootloader_id, "-l", loader_path
-                 ]
-                 
-                 # Run efibootmgr inside chroot
-                 efibm_success, efibm_err, _ = _run_in_chroot(target_root, efibootmgr_cmd, "Register EFI Boot Entry", progress_callback, timeout=60)
-                 if not efibm_success:
-                     print(f"Warning: efibootmgr failed to create boot entry: {efibm_err}")
-                 else:
-                     print("Successfully registered boot entry with efibootmgr.")
-             else:
-                 print(f"Warning: Could not parse disk/partition from {efi_partition_device}. Cannot run efibootmgr.")
+        efi_mount_point = os.path.join(target_root, "boot/efi")
+        boot_target_dir = os.path.join(efi_mount_point, "EFI/BOOT")
+        shim_target_path = os.path.join(boot_target_dir, "BOOTX64.EFI") # Shim takes the default boot path
+        grub_target_path = os.path.join(boot_target_dir, "grubx64.efi") # GRUB loaded by Shim
+        
+        # --- Find shimx64.efi and grubx64.efi within the chroot --- 
+        shim_source_path_in_chroot = None
+        grub_source_path_in_chroot = None
+        
+        print("Searching for shimx64.efi within the target system...")
+        find_shim_cmd = ["find", "/usr", "-name", "shimx64.efi"]
+        find_shim_success, find_shim_err, find_shim_stdout = _run_in_chroot(target_root, find_shim_cmd, "Find shimx64.efi")
+        if find_shim_success and find_shim_stdout:
+            # Take the first line found
+            shim_source_path_in_chroot = find_shim_stdout.splitlines()[0].strip()
+            print(f"  Found shimx64.efi at: {shim_source_path_in_chroot}")
+        else:
+            return False, f"Could not find shimx64.efi within {target_root}/usr. Error: {find_shim_err}", None
+            
+        print("Searching for grubx64.efi within the target system...")
+        find_grub_cmd = ["find", "/usr", "-name", "grubx64.efi"]
+        find_grub_success, find_grub_err, find_grub_stdout = _run_in_chroot(target_root, find_grub_cmd, "Find grubx64.efi")
+        if find_grub_success and find_grub_stdout:
+            # Take the first line found
+            grub_source_path_in_chroot = find_grub_stdout.splitlines()[0].strip()
+            print(f"  Found grubx64.efi at: {grub_source_path_in_chroot}")
+        else:
+            return False, f"Could not find grubx64.efi within {target_root}/usr. Error: {find_grub_err}", None
+            
+        # Convert chroot paths to host paths for shutil
+        shim_source_path_on_host = os.path.join(target_root, shim_source_path_in_chroot.lstrip('/'))
+        grub_source_path_on_host = os.path.join(target_root, grub_source_path_in_chroot.lstrip('/'))
+        
+        # --- Manually Copy Files --- 
+        try:
+            print(f"  Creating EFI boot directory: {boot_target_dir}...")
+            os.makedirs(boot_target_dir, exist_ok=True)
+            
+            print(f"  Copying {shim_source_path_on_host} -> {shim_target_path}...")
+            shutil.copy2(shim_source_path_on_host, shim_target_path)
+            
+            print(f"  Copying {grub_source_path_on_host} -> {grub_target_path}...")
+            shutil.copy2(grub_source_path_on_host, grub_target_path)
+            
+        except Exception as e:
+            err_msg = f"Failed during manual copy of EFI files: {e}"
+            print(f"ERROR: {err_msg}")
+            return False, err_msg, None
+            
+        # --- Run efibootmgr to register Shim --- 
+        print(f"Attempting to register boot entry using efibootmgr for {efi_partition_device}...")
+        match = re.match(r"(/dev/[a-zA-Z]+)(\d+)", efi_partition_device) or \
+                re.match(r"(/dev/nvme\d+n\d+)p(\d+)", efi_partition_device)
+        
+        if match:
+            efi_disk = match.group(1)
+            efi_part_num = match.group(2)
+            loader_path = "\\EFI\\BOOT\\BOOTX64.EFI" # Path to Shim (BOOTX64.EFI)
+            
+            efibootmgr_cmd = [
+                "efibootmgr", "-c", 
+                "-d", efi_disk, "-p", efi_part_num,
+                "-L", bootloader_id, "-l", loader_path
+            ]
+            
+            efibm_success, efibm_err, _ = _run_in_chroot(target_root, efibootmgr_cmd, "Register EFI Boot Entry", progress_callback, timeout=60)
+            if not efibm_success:
+                print(f"Warning: efibootmgr failed to create boot entry: {efibm_err}")
+            else:
+                print("Successfully registered boot entry with efibootmgr.")
+        else:
+            print(f"Warning: Could not parse disk/partition from {efi_partition_device}. Cannot run efibootmgr.")
 
     else: # BIOS System
         print("BIOS system detected, installing GRUB for BIOS using grub2-install.")
@@ -713,12 +744,10 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             "--target=i386-pc", 
             grub_target_disk # Install to the disk MBR/boot sector
         ]
-        # Run grub2-install for BIOS
         success, err, _ = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB (BIOS)", progress_callback, timeout=120)
         if not success: return False, err, None
 
     # --- Generate GRUB config (Common to UEFI and BIOS) --- 
-    # This runs only if the respective grub-install succeeded
     print("Generating GRUB configuration file (grub.cfg)...")
     grub_mkconfig_cmd = ["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"]
     success, err, _ = _run_in_chroot(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
