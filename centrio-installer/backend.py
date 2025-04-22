@@ -701,23 +701,47 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         shim_target_path = os.path.join(boot_target_dir, "BOOTX64.EFI") # Shim takes the default boot path
         grub_target_path = os.path.join(boot_target_dir, "grubx64.efi") # GRUB loaded by Shim
         
-        # --- Find shimx64.efi and grubx64.efi within the chroot --- 
+        # --- Find shim*.efi and grubx64.efi within the chroot --- 
         shim_source_path_in_chroot = None
         grub_source_path_in_chroot = None
         
-        print("Searching for shimx64.efi within the target system...")
-        # Search entire filesystem instead of just /usr
-        find_shim_cmd = ["find", "/", "-name", "shimx64.efi"]
-        find_shim_success, find_shim_err, find_shim_stdout = _run_in_chroot(target_root, find_shim_cmd, "Find shimx64.efi")
+        # --- Sync filesystem before searching --- 
+        print("Running sync before searching for EFI files...")
+        try:
+            subprocess.run(["sync"], check=False, timeout=15)
+            time.sleep(2) # Add a 2-second delay
+            subprocess.run(["sync"], check=False, timeout=15)
+            print("Sync complete.")
+        except Exception as sync_e:
+            print(f"Warning: Sync before find failed: {sync_e}")
+        # --- End sync ---
+        
+        print("Searching for shim*.efi within the target system...")
+        # Broaden search to find any shim file
+        find_shim_cmd = ["find", "/", "-name", "shim*.efi"]
+        find_shim_success, find_shim_err, find_shim_stdout = _run_in_chroot(target_root, find_shim_cmd, "Find shim*.efi")
+        
         if find_shim_success and find_shim_stdout:
-            # Take the first line found
-            shim_source_path_in_chroot = find_shim_stdout.splitlines()[0].strip()
-            print(f"  Found shimx64.efi at: {shim_source_path_in_chroot}")
+            found_shims = [line.strip() for line in find_shim_stdout.splitlines() if line.strip()]
+            print(f"  Found potential shim files: {found_shims}")
+            # Select the best match (prefer x64/x86_64)
+            for shim_path in found_shims:
+                if "x64" in shim_path.lower() or "x86_64" in shim_path.lower():
+                    shim_source_path_in_chroot = shim_path
+                    break
+            if not shim_source_path_in_chroot and found_shims:
+                shim_source_path_in_chroot = found_shims[0] # Fallback to first found
+            
+            if shim_source_path_in_chroot:
+                 print(f"  Selected shim file: {shim_source_path_in_chroot}")
+            else:
+                 # This case should not be reached if find_shim_stdout was non-empty
+                 return False, "Could not select a suitable shim file from find results.", None
         else:
-            return False, f"Could not find shimx64.efi within {target_root}. Error: {find_shim_err}", None
+            return False, f"Could not find any shim*.efi file within {target_root}. Error: {find_shim_err}", None
             
         print("Searching for grubx64.efi within the target system...")
-        # Search entire filesystem instead of just /usr
+        # Keep grub search specific for now
         find_grub_cmd = ["find", "/", "-name", "grubx64.efi"]
         find_grub_success, find_grub_err, find_grub_stdout = _run_in_chroot(target_root, find_grub_cmd, "Find grubx64.efi")
         if find_grub_success and find_grub_stdout:
