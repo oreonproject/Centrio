@@ -108,7 +108,7 @@ def ana_get_available_locales():
         "de_DE.UTF-8": "German (Germany)"
     } 
 
-from .constants import APP_ID, VERSION
+from .constants import APP_ID
 
 def get_os_release_info(target_root=None):
     """Parses /etc/os-release (or /usr/lib/os-release) to get NAME and VERSION_ID.
