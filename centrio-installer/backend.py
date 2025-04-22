@@ -466,8 +466,9 @@ def install_packages_dnf(target_root, progress_callback=None):
     
     # --- Define Packages and Command --- 
     packages = [
-        "@core", "kernel", "grub2-efi-x64", "grub2-pc", "efibootmgr", 
-        "grub2-efi-x64-modules", 
+        "@core", "kernel", 
+        "grub2-efi-x64", "grub2-efi-x64-modules", "grub2-pc", "efibootmgr", 
+        "grub2-common", "grub2-tools", # Add common/tools packages
         "shim-x64", "shim", # Removed shim-x86_64
         "linux-firmware", "NetworkManager", "systemd-resolved", 
         "bash-completion", "dnf-utils"
@@ -616,9 +617,16 @@ def install_packages_dnf(target_root, progress_callback=None):
             return False, error_msg
         else:
              print(f"SUCCESS: DNF installation completed.")
+             # --- Run sync after successful DNF --- 
+             print("Running sync after DNF installation...")
+             try:
+                 subprocess.run(["sync"], check=False, timeout=15)
+                 print("Sync complete.")
+             except Exception as sync_e:
+                 print(f"Warning: Sync after DNF failed: {sync_e}")
+             # --- End sync ---
              if progress_callback: progress_callback("DNF installation complete.", 1.0)
              # Optionally enable NetworkManager here (but requires _run_in_chroot, which uses _run_command)
-             # Consider moving NM enable to a separate step after this function returns success.
              return True, ""
             
     except FileNotFoundError:
