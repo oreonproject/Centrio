@@ -451,7 +451,7 @@ def install_packages_dnf(target_root, progress_callback=None):
     packages = [
         "@core", "kernel", "grub2-efi-x64", "grub2-pc", "efibootmgr", 
         "grub2-efi-x64-modules", 
-        "shim-x64", "shim", "shim-x86_64", # Added EFI modules and shim alternatives
+        "shim-x64", "shim", # Removed shim-x86_64
         "linux-firmware", "NetworkManager", "systemd-resolved", 
         "bash-completion", "dnf-utils"
         # Add more packages as needed
