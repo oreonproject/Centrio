@@ -16,38 +16,28 @@ import backend
 
 class ProgressPage(Gtk.Box):
     def __init__(self, **kwargs):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6, **kwargs)
-        # Main box contains ScrolledWindow and potentially other fixed elements if needed
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18, **kwargs)
+        # Remove nested ScrolledWindow to prevent conflicts with main window scrolling
         self.set_vexpand(True)
+        self.set_margin_top(36)
+        self.set_margin_bottom(36)
+        self.set_margin_start(48)
+        self.set_margin_end(48)
+        self.set_valign(Gtk.Align.CENTER)
 
-        # --- Scrolled Window for Content --- 
-        scrolled_window = Gtk.ScrolledWindow()
-        scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC) # Allow vertical scroll
-        scrolled_window.set_vexpand(True)
-        self.append(scrolled_window)
-        
-        # --- Content Box (Inside Scrolled Window) --- 
-        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-        content_box.set_margin_top(36)
-        content_box.set_margin_bottom(36)
-        content_box.set_margin_start(48)
-        content_box.set_margin_end(48)
-        # Removed valign=CENTER and vexpand=True from content_box, ScrolledWindow handles expansion
-        scrolled_window.set_child(content_box)
-
-        # Add widgets to the content_box
+        # Add widgets directly to the main box
         title = Gtk.Label(label="Installing System")
         title.add_css_class("title-1")
-        content_box.append(title)
+        self.append(title)
 
         self.progress_bar = Gtk.ProgressBar(show_text=True, text="Starting installation...")
         self.progress_bar.set_pulse_step(0.1)
-        content_box.append(self.progress_bar)
+        self.append(self.progress_bar)
 
         self.progress_label = Gtk.Label(label="")
         self.progress_label.set_wrap(True)
         self.progress_label.set_xalign(0.0) # Align text to the left
-        content_box.append(self.progress_label)
+        self.append(self.progress_label)
 
         # --- State Variables --- 
         self.progress_value = 0.0

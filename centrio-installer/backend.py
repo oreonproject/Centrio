@@ -513,6 +513,7 @@ def install_packages_enhanced(target_root, package_config, progress_callback=Non
     - packages: list of package names to install
     - repositories: list of additional repositories to setup
     - flatpak_enabled: whether to install and setup Flatpak
+    - flatpak_packages: list of flatpak package IDs to install
     - minimal_install: whether to perform minimal installation
     """
     
@@ -528,12 +529,14 @@ def install_packages_enhanced(target_root, package_config, progress_callback=Non
     packages = package_config.get("packages", [])
     repositories = package_config.get("repositories", [])
     flatpak_enabled = package_config.get("flatpak_enabled", False)
+    flatpak_packages = package_config.get("flatpak_packages", [])
     minimal_install = package_config.get("minimal_install", False)
     keep_cache = package_config.get("keep_cache", True)
     
     print(f"Packages to install: {len(packages)}")
     print(f"Additional repositories: {len(repositories)}")
     print(f"Flatpak enabled: {flatpak_enabled}")
+    print(f"Flatpak packages to install: {len(flatpak_packages)}")
     print(f"Minimal installation: {minimal_install}")
     
     # --- Setup Additional Repositories First ---
@@ -572,12 +575,22 @@ def install_packages_enhanced(target_root, package_config, progress_callback=Non
     # --- Setup Flatpak if enabled ---
     if flatpak_enabled:
         if progress_callback:
-            progress_callback("Setting up Flatpak...", 0.9)
+            progress_callback("Setting up Flatpak...", 0.85)
         
         success, err = setup_flatpak(target_root, progress_callback)
         if not success:
             print(f"Warning: Flatpak setup failed: {err}")
             # Don't fail the entire installation for Flatpak issues
+        
+        # --- Install Flatpak packages ---
+        if flatpak_packages:
+            if progress_callback:
+                progress_callback("Installing Flatpak applications...", 0.9)
+            
+            success, err = install_flatpak_packages(target_root, flatpak_packages, progress_callback)
+            if not success:
+                print(f"Warning: Some Flatpak packages failed to install: {err}")
+                # Don't fail the entire installation for Flatpak package issues
     
     if progress_callback:
         progress_callback("Package installation complete.", 1.0)
@@ -587,6 +600,18 @@ def install_packages_enhanced(target_root, package_config, progress_callback=Non
 
 def _install_packages_dnf_impl(target_root, packages, progress_callback=None, keep_cache=True):
     """Implementation of DNF package installation with progress tracking."""
+    
+    # --- Filter out problematic packages --- 
+    filtered_packages = []
+    for pkg in packages:
+        # Filter out almalinux-* packages that conflict with oreon-*
+        if pkg.startswith("almalinux-"):
+            print(f"Filtering out conflicting package: {pkg}")
+            continue
+        filtered_packages.append(pkg)
+    
+    packages = filtered_packages
+    print(f"Installing {len(packages)} packages after filtering")
     
     # --- Get Release Version --- 
     os_info = get_os_release_info()
@@ -804,7 +829,7 @@ def setup_flatpak(target_root, progress_callback=None):
     # Add Flathub repository
     flathub_cmd = [
         "flatpak", "remote-add", "--if-not-exists", "flathub", 
-        "https://flathub.org/repo/flathub.flatpakrepo"
+        "https://dl.flathub.org/repo/flathub.flatpakrepo"
     ]
     
     success, err, _ = _run_in_chroot(target_root, flathub_cmd, "Add Flathub repository", progress_callback, timeout=60)
@@ -824,6 +849,45 @@ def setup_flatpak(target_root, progress_callback=None):
     
     print("Flatpak setup completed successfully.")
     return True, ""
+
+def install_flatpak_packages(target_root, flatpak_packages, progress_callback=None):
+    """Install Flatpak packages in the target system."""
+    if not flatpak_packages:
+        print("No Flatpak packages to install.")
+        return True, ""
+    
+    print(f"Installing {len(flatpak_packages)} Flatpak packages...")
+    errors = []
+    
+    for i, package in enumerate(flatpak_packages):
+        if progress_callback:
+            progress = i / len(flatpak_packages)
+            progress_callback(f"Installing Flatpak package: {package}...", progress)
+        
+        print(f"Installing Flatpak package: {package}")
+        
+        # Install flatpak package system-wide
+        install_cmd = [
+            "flatpak", "install", "-y", "--system", "flathub", package
+        ]
+        
+        success, err, _ = _run_in_chroot(target_root, install_cmd, f"Install Flatpak {package}", progress_callback, timeout=300)
+        if not success:
+            err_msg = f"Failed to install Flatpak package {package}: {err}"
+            print(f"ERROR: {err_msg}")
+            errors.append(err_msg)
+        else:
+            print(f"Successfully installed Flatpak package: {package}")
+    
+    final_error = "\n".join(errors) if errors else ""
+    success = len(errors) == 0
+    
+    if success:
+        print("All Flatpak packages installed successfully.")
+    else:
+        print(f"Flatpak installation completed with {len(errors)} errors.")
+    
+    return success, final_error
 
 # Keep the original function for backward compatibility
 def install_packages_dnf(target_root, progress_callback=None):

@@ -12,7 +12,7 @@ DEFAULT_PACKAGE_GROUPS = {
     "core": {
         "name": "Core System",
         "description": "Essential system packages (required)",
-        "packages": ["@core", "kernel", "grub2-efi-x64", "grub2-pc", "NetworkManager", "systemd-resolved"],
+        "packages": ["@core", "kernel", "grub2-efi-x64", "grub2-pc", "NetworkManager", "systemd-resolved", "flatpak", "xdg-desktop-portal", "xdg-desktop-portal-gtk"],
         "required": True,
         "selected": True
     },
@@ -40,14 +40,16 @@ DEFAULT_PACKAGE_GROUPS = {
     "productivity": {
         "name": "Productivity Suite",
         "description": "Office applications and productivity tools",
-        "packages": ["libreoffice", "firefox", "thunderbird", "gimp"],
+        "packages": ["thunderbird", "gimp"],
+        "flatpak_packages": ["org.libreoffice.LibreOffice", "org.mozilla.firefox"],
         "required": False,
         "selected": False
     },
     "gaming": {
         "name": "Gaming Support",
         "description": "Steam and gaming-related packages",
-        "packages": ["steam", "lutris", "wine", "gamemode"],
+        "packages": ["gamemode"],
+        "flatpak_packages": ["com.valvesoftware.Steam", "net.lutris.Lutris", "org.winehq.Wine"],
         "required": False,
         "selected": False
     }
@@ -67,11 +69,11 @@ COMMON_REPOSITORIES = {
         "url": "https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm",
         "enabled": False
     },
-    "flathub": {
-        "name": "Flathub",
-        "description": "Flatpak application repository",
-        "url": "https://flathub.org/repo/flathub.flatpakrepo",
-        "enabled": True
+    "oem_example": {
+        "name": "OEM Example Repository",
+        "description": "Example custom OEM repository",
+        "url": "https://example.com/repo/example.repo",
+        "enabled": False
     }
 }
 
@@ -266,33 +268,40 @@ class PayloadPage(BaseConfigurationPage):
         print(f"Minimal installation {'enabled' if is_minimal else 'disabled'}")
         
     def _get_selected_packages(self):
-        """Get the complete list of packages to install."""
-        packages = []
+        """Get the complete list of DNF packages and flatpak packages to install."""
+        dnf_packages = []
+        flatpak_packages = []
         
         # Add packages from selected groups
         for group_id, group_info in self.package_groups.items():
             if group_info["selected"] or group_info["required"]:
-                packages.extend(group_info["packages"])
+                dnf_packages.extend(group_info["packages"])
+                # Add flatpak packages if the group has them
+                if "flatpak_packages" in group_info:
+                    flatpak_packages.extend(group_info["flatpak_packages"])
         
-        # Add custom packages
-        packages.extend(self.custom_packages)
+        # Add custom packages (assume they are DNF packages)
+        dnf_packages.extend(self.custom_packages)
         
-        # Add OEM packages if any
-        packages.extend(self.oem_packages)
-        
-        # Add Flatpak if enabled
-        if self.flatpak_enabled:
-            packages.extend(["flatpak", "xdg-desktop-portal", "xdg-desktop-portal-gtk"])
+        # Add OEM packages if any (assume they are DNF packages)
+        dnf_packages.extend(self.oem_packages)
         
         # Remove duplicates while preserving order
         seen = set()
-        unique_packages = []
-        for pkg in packages:
+        unique_dnf_packages = []
+        for pkg in dnf_packages:
             if pkg not in seen:
                 seen.add(pkg)
-                unique_packages.append(pkg)
+                unique_dnf_packages.append(pkg)
                 
-        return unique_packages
+        seen = set()
+        unique_flatpak_packages = []
+        for pkg in flatpak_packages:
+            if pkg not in seen:
+                seen.add(pkg)
+                unique_flatpak_packages.append(pkg)
+                
+        return unique_dnf_packages, unique_flatpak_packages
         
     def _get_enabled_repositories(self):
         """Get the list of repositories to enable."""
@@ -320,10 +329,11 @@ class PayloadPage(BaseConfigurationPage):
         """Apply the software configuration and return to summary."""
         print(f"--- Apply Software Settings START ---")
         
-        selected_packages = self._get_selected_packages()
+        selected_packages, flatpak_packages = self._get_selected_packages()
         enabled_repos = self._get_enabled_repositories()
         
         print(f"  Selected packages ({len(selected_packages)}): {selected_packages[:10]}{'...' if len(selected_packages) > 10 else ''}")
+        print(f"  Flatpak packages ({len(flatpak_packages)}): {flatpak_packages}")
         print(f"  Enabled repositories: {[r['id'] for r in enabled_repos]}")
         print(f"  Flatpak enabled: {self.flatpak_enabled}")
         
@@ -331,6 +341,7 @@ class PayloadPage(BaseConfigurationPage):
         config_values = {
             "package_groups": {gid: ginfo["selected"] for gid, ginfo in self.package_groups.items()},
             "packages": selected_packages,
+            "flatpak_packages": flatpak_packages,
             "repositories": enabled_repos,
             "flatpak_enabled": self.flatpak_enabled,
             "custom_packages": self.custom_packages,
@@ -341,6 +352,7 @@ class PayloadPage(BaseConfigurationPage):
         
         # Show confirmation
         package_count = len(selected_packages)
+        flatpak_count = len(flatpak_packages)
         repo_count = len(enabled_repos)
         features = []
         
@@ -353,7 +365,8 @@ class PayloadPage(BaseConfigurationPage):
             
         feature_text = f" ({', '.join(features)})" if features else ""
         
-        self.show_toast(f"Software plan: {package_count} packages, {repo_count} repositories{feature_text}")
+        total_software = package_count + flatpak_count
+        self.show_toast(f"Software plan: {total_software} packages ({package_count} DNF, {flatpak_count} Flatpak), {repo_count} repositories{feature_text}")
         
         print("Software configuration confirmed. Returning to summary.")
         super().mark_complete_and_return(button, config_values=config_values) 
