@@ -397,6 +397,50 @@ class ProgressPage(Gtk.Box):
                     
             self._update_progress_text("Partitioning and formatting complete.", 0.30) # End fraction adjusted
             
+            # --- Verify partitions were created successfully ---
+            self._update_progress_text("Verifying partition creation...", 0.31)
+            for part_info in partitions:
+                device = part_info.get("device")
+                mountpoint = part_info.get("mountpoint", "unknown")
+                
+                if not device:
+                    continue
+                    
+                print(f"Verifying partition: {device} (for {mountpoint})")
+                
+                # Check if partition device exists
+                max_wait_time = 10  # seconds
+                wait_time = 0
+                while not os.path.exists(device) and wait_time < max_wait_time:
+                    print(f"  Waiting for partition {device} to appear...")
+                    time.sleep(1)
+                    wait_time += 1
+                
+                if not os.path.exists(device):
+                    err_msg = f"Partition {device} was not created after partitioning commands"
+                    print(f"ERROR: {err_msg}")
+                    self.installation_error = err_msg
+                    return False
+                
+                # Verify it's a block device
+                try:
+                    stat_result = os.stat(device)
+                    import stat
+                    if not stat.S_ISBLK(stat_result.st_mode):
+                        err_msg = f"Created partition {device} is not a block device"
+                        print(f"ERROR: {err_msg}")
+                        self.installation_error = err_msg
+                        return False
+                except Exception as e:
+                    err_msg = f"Could not verify partition {device}: {e}"
+                    print(f"ERROR: {err_msg}")
+                    self.installation_error = err_msg
+                    return False
+                
+                print(f"  Partition {device} verified successfully")
+            
+            print("All partitions verified successfully")
+            
         elif not automatic_mode:
             print("Manual partitioning selected. Skipping wipefs/parted/mkfs commands.")
             self._update_progress_text("Using existing partitions...", 0.25)
@@ -463,13 +507,95 @@ class ProgressPage(Gtk.Box):
             mount_desc = f"Mount {device} ({fstype}) -> {full_mount_path}"
             self._update_progress_text(mount_desc + "...", progress_fraction + 0.01)
             print(f"Running on host: {mount_desc} -> {' '.join(shlex.quote(c) for c in mount_cmd)}")
+            
+            # Add verification before mounting, especially for EFI partitions
+            if mountpoint == "/boot/efi":
+                print(f"=== EFI Partition Mount Verification ===")
+                print(f"Device: {device}")
+                print(f"Mount point: {full_mount_path}")
+                
+                # Check if device exists
+                if not os.path.exists(device):
+                    err_msg = f"EFI partition device does not exist: {device}"
+                    print(f"ERROR: {err_msg}")
+                    self.installation_error = err_msg
+                    self._attempt_unmount()
+                    return False
+                
+                # Check if device is a block device
+                try:
+                    stat_result = os.stat(device)
+                    import stat
+                    if not stat.S_ISBLK(stat_result.st_mode):
+                        err_msg = f"EFI partition device is not a block device: {device}"
+                        print(f"ERROR: {err_msg}")
+                        self.installation_error = err_msg
+                        self._attempt_unmount()
+                        return False
+                except Exception as e:
+                    err_msg = f"Could not stat EFI partition device {device}: {e}"
+                    print(f"ERROR: {err_msg}")
+                    self.installation_error = err_msg
+                    self._attempt_unmount()
+                    return False
+                
+                # Use blkid to verify filesystem type
+                try:
+                    blkid_cmd = ["blkid", "-o", "value", "-s", "TYPE", device]
+                    blkid_result = subprocess.run(blkid_cmd, capture_output=True, text=True, check=False, timeout=10)
+                    detected_fstype = blkid_result.stdout.strip()
+                    print(f"Detected filesystem type: '{detected_fstype}'")
+                    
+                    if blkid_result.returncode == 0:
+                        if detected_fstype != "vfat":
+                            print(f"WARNING: Expected vfat filesystem, found '{detected_fstype}'")
+                    else:
+                        print(f"WARNING: blkid failed to detect filesystem type (rc={blkid_result.returncode})")
+                        print(f"  stderr: {blkid_result.stderr.strip()}")
+                except Exception as e:
+                    print(f"WARNING: Could not verify filesystem type with blkid: {e}")
+                
+                # Add a small delay to ensure partition table is settled
+                print("Adding delay to ensure partition is ready...")
+                time.sleep(2)
+                
+                print(f"=== End EFI Partition Verification ===")
+            
             try:
                  # Use subprocess.run directly as we are already root
                  result = subprocess.run(mount_cmd, capture_output=True, text=True, check=True, timeout=30)
                  print(f"  Mount successful. stdout: {result.stdout.strip()}, stderr: {result.stderr.strip()}")
+                 
+                 # Verify the mount was successful by checking if it's actually mounted
+                 try:
+                     mount_check_cmd = ["findmnt", full_mount_path]
+                     mount_check_result = subprocess.run(mount_check_cmd, capture_output=True, text=True, check=False, timeout=5)
+                     if mount_check_result.returncode == 0:
+                         print(f"  Mount verification successful: {mount_check_result.stdout.strip()}")
+                     else:
+                         print(f"  WARNING: Mount verification failed, but mount command succeeded")
+                 except Exception as e:
+                     print(f"  WARNING: Could not verify mount: {e}")
+                     
             except subprocess.CalledProcessError as e:
                  err_msg = f"Failed to mount {device} to {full_mount_path} (rc={e.returncode}): {e.stderr.strip() or e.stdout.strip()}"
                  print(f"ERROR: {err_msg}")
+                 
+                 # Add additional debugging for EFI mount failures
+                 if mountpoint == "/boot/efi":
+                     print("=== Additional EFI Mount Debugging ===")
+                     try:
+                         # Check if the device exists after mount failure
+                         lsblk_cmd = ["lsblk", device]
+                         lsblk_result = subprocess.run(lsblk_cmd, capture_output=True, text=True, check=False, timeout=10)
+                         print(f"lsblk output for {device}:")
+                         print(f"  stdout: {lsblk_result.stdout}")
+                         print(f"  stderr: {lsblk_result.stderr}")
+                         print(f"  returncode: {lsblk_result.returncode}")
+                     except Exception as debug_e:
+                         print(f"Could not run lsblk for debugging: {debug_e}")
+                     print("=== End Additional EFI Mount Debugging ===")
+                 
                  self.installation_error = err_msg
                  self._attempt_unmount() # Cleanup previously mounted
                  return False
