@@ -150,8 +150,25 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
         
     # Add /boot/efi path if it exists and is mounted
     target_boot_efi_path = os.path.join(target_root, "boot/efi")
-    if os.path.exists(target_boot_efi_path) and os.path.ismount(target_boot_efi_path):
-        mount_points["boot_efi"] = target_boot_efi_path
+    if os.path.exists(target_boot_efi_path):
+        # Check if it's mounted by looking for any mount activity
+        try:
+            # Use findmnt to check if this is a mount point
+            findmnt_cmd = ["findmnt", target_boot_efi_path]
+            findmnt_result = subprocess.run(findmnt_cmd, capture_output=True, text=True, check=False, timeout=5)
+            if findmnt_result.returncode == 0:
+                mount_points["boot_efi"] = target_boot_efi_path
+                print(f"  Will bind-mount /boot/efi into chroot: {target_boot_efi_path}")
+            else:
+                print(f"  /boot/efi exists but is not mounted: {target_boot_efi_path}")
+        except Exception as e:
+            print(f"  Warning: Could not check /boot/efi mount status: {e}")
+            # If we can't check, but the directory exists, try to include it anyway
+            if os.path.exists(target_boot_efi_path):
+                mount_points["boot_efi"] = target_boot_efi_path
+                print(f"  Including /boot/efi in chroot anyway: {target_boot_efi_path}")
+    else:
+        print(f"  /boot/efi directory does not exist: {target_boot_efi_path}")
     
     try:
         # --- Mount API filesystems, resolv.conf, and D-Bus socket --- 
@@ -216,9 +233,14 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
                  print(f"  Skipping efivars mount (host path {host_efi_vars_path} not found).")
                  continue
                  
+            # Skip boot mount if target wasn't added
+            if name == "boot" and not target:
+                 print(f"  Skipping boot mount (directory {target_boot_path} not found).")
+                 continue
+                 
             # Skip boot_efi mount if target wasn't added (not mounted)
             if name == "boot_efi" and not target:
-                 print(f"  Skipping boot_efi mount (EFI partition not mounted).")
+                 print(f"  Skipping boot_efi mount (EFI partition not mounted or directory not found).")
                  continue
                  
             try:
@@ -966,7 +988,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     
     # Detect if system is likely UEFI (check for /sys/firmware/efi)
     is_uefi = os.path.exists("/sys/firmware/efi")
-    grub_target_disk = primary_disk # Needed for BIOS install
+    grub_target_disk = primary_disk
     
     if is_uefi:
         print(f"UEFI system detected. Setting up GRUB with Secure Boot support ({bootloader_id}).")
@@ -976,6 +998,14 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         # Set up proper secure boot with shim manually
         efi_mount_point = os.path.join(target_root, "boot/efi")
         boot_target_dir = os.path.join(efi_mount_point, "EFI/Oreon")
+        
+        # Verify EFI partition is mounted
+        if not os.path.exists(efi_mount_point):
+            return False, f"EFI mount point does not exist: {efi_mount_point}", None
+        if not os.path.ismount(efi_mount_point):
+            return False, f"EFI partition is not mounted at: {efi_mount_point}", None
+        
+        print(f"EFI partition verified at: {efi_mount_point}")
         
         # Create EFI directory
         try:
@@ -999,9 +1029,36 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
                 break
         
         if not shim_source:
-            return False, "Could not find shimx64.efi in target system", None
+            # Try to find shim files in any location
+            print("Searching for shimx64.efi in target system...")
+            try:
+                find_result = subprocess.run(
+                    ["find", target_root, "-name", "shimx64.efi", "-type", "f"],
+                    capture_output=True, text=True, timeout=30, check=False
+                )
+                if find_result.stdout.strip():
+                    found_files = find_result.stdout.strip().split('\n')
+                    shim_source = found_files[0]  # Use first found file
+                    print(f"Found shim via search: {shim_source}")
+                else:
+                    print("No shimx64.efi files found anywhere in target system")
+            except Exception as e:
+                print(f"Error searching for shim files: {e}")
+            
+            if not shim_source:
+                return False, "Could not find shimx64.efi in target system. Ensure shim-x64 package is installed.", None
         
-        # grub2-install will create grubx64.efi for us
+        # Verify that required GRUB packages are installed
+        required_grub_packages = ["grub2-efi-x64", "grub2-tools", "grub2-common"]
+        for pkg in required_grub_packages:
+            check_cmd = ["rpm", "-q", pkg, f"--root={target_root}"]
+            try:
+                result = subprocess.run(check_cmd, capture_output=True, text=True, check=False, timeout=10)
+                if result.returncode != 0:
+                    return False, f"Required package {pkg} is not installed in target system", None
+                print(f"Verified package installed: {pkg}")
+            except Exception as e:
+                print(f"Warning: Could not verify package {pkg}: {e}")
         
         # Use grub2-install to create grubx64.efi in the target directory
         grub_install_cmd = [
@@ -1012,9 +1069,15 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             "--no-nvram"  # Don't register with efibootmgr yet
         ]
         
-        success, err, _ = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB EFI", timeout=120)
+        print(f"Running grub2-install command: {' '.join(grub_install_cmd)}")
+        success, err, stdout = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB EFI", timeout=120)
         if not success:
-            return False, f"Failed to install GRUB EFI: {err}", None
+            error_msg = f"Failed to install GRUB EFI: {err}"
+            if stdout:
+                error_msg += f"\nStdout: {stdout}"
+            return False, error_msg, None
+        
+        print("grub2-install completed successfully")
         
         # Copy shim files and ensure grub files exist
         try:
@@ -1043,6 +1106,10 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             else:
                 print(f"grubx64.efi already exists at: {grub_source}")
             
+            # Verify grubx64.efi was created/copied successfully
+            if not os.path.exists(grub_source) or os.path.getsize(grub_source) == 0:
+                return False, f"grubx64.efi was not created properly at {grub_source}", None
+            
             # Copy shimx64.efi as BOOTX64.EFI (default boot loader)
             shim_target = os.path.join(boot_target_dir, "BOOTX64.EFI")
             shutil.copy2(shim_source, shim_target)
@@ -1052,6 +1119,19 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             shim_named_target = os.path.join(boot_target_dir, "shimx64.efi") 
             shutil.copy2(shim_source, shim_named_target)
             print(f"Copied shim: {shim_source} -> {shim_named_target}")
+            
+            # Verify all files were copied successfully
+            required_files = [
+                (grub_source, "grubx64.efi"),
+                (shim_target, "BOOTX64.EFI"), 
+                (shim_named_target, "shimx64.efi")
+            ]
+            
+            for file_path, file_name in required_files:
+                if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                    return False, f"Required EFI file {file_name} was not created properly at {file_path}", None
+            
+            print("All EFI files copied and verified successfully")
             
         except Exception as e:
             return False, f"Failed to copy EFI files: {e}", None
