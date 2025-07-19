@@ -454,11 +454,11 @@ class ProgressPage(Gtk.Box):
                  return False
 
             # Build mount command (add options if needed, e.g., for vfat)
-            mount_cmd = ["mount", device, full_mount_path]
             if fstype == "vfat":
                  # Add common options for FAT filesystems like EFI
-                 mount_cmd.insert(1, "-o")
-                 mount_cmd.insert(2, "rw,relatime,fmask=0077,dmask=0077,codepage=437,iocharset=iso8859-1,shortname=mixed,errors=remount-ro")
+                 mount_cmd = ["mount", "-o", "rw,relatime,fmask=0077,dmask=0077,codepage=437,iocharset=iso8859-1,shortname=mixed,errors=remount-ro", device, full_mount_path]
+            else:
+                 mount_cmd = ["mount", device, full_mount_path]
                  
             mount_desc = f"Mount {device} ({fstype}) -> {full_mount_path}"
             self._update_progress_text(mount_desc + "...", progress_fraction + 0.01)
