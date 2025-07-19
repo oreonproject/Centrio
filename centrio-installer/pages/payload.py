@@ -68,12 +68,6 @@ COMMON_REPOSITORIES = {
         "url": "https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm",
         "enabled": False
     },
-    "oem_example": {
-        "name": "OEM Example Repository",
-        "description": "Example custom OEM repository",
-        "url": "https://example.com/repo/example.repo",
-        "enabled": False
-    }
 }
 
 class PayloadPage(BaseConfigurationPage):
