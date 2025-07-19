@@ -1016,8 +1016,33 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         if not success:
             return False, f"Failed to install GRUB EFI: {err}", None
         
-        # Copy shim files to create proper secure boot setup
+        # Copy shim files and ensure grub files exist
         try:
+            # Check if grub2-install actually created the files
+            grub_efi_dir = os.path.join(boot_target_dir)
+            grub_source = os.path.join(grub_efi_dir, "grubx64.efi")
+            
+            if not os.path.exists(grub_source):
+                # Find grubx64.efi elsewhere and copy it
+                grub_locations = [
+                    f"{target_root}/usr/lib/grub/x86_64-efi/grubx64.efi",
+                    f"{target_root}/usr/share/grub/x86_64-efi/grubx64.efi"
+                ]
+                
+                grub_found = None
+                for loc in grub_locations:
+                    if os.path.exists(loc):
+                        grub_found = loc
+                        break
+                
+                if grub_found:
+                    shutil.copy2(grub_found, grub_source)
+                    print(f"Copied grubx64.efi: {grub_found} -> {grub_source}")
+                else:
+                    return False, f"Could not find grubx64.efi anywhere in target system", None
+            else:
+                print(f"grubx64.efi already exists at: {grub_source}")
+            
             # Copy shimx64.efi as BOOTX64.EFI (default boot loader)
             shim_target = os.path.join(boot_target_dir, "BOOTX64.EFI")
             shutil.copy2(shim_source, shim_target)
@@ -1027,12 +1052,6 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             shim_named_target = os.path.join(boot_target_dir, "shimx64.efi") 
             shutil.copy2(shim_source, shim_named_target)
             print(f"Copied shim: {shim_source} -> {shim_named_target}")
-            
-            # grubx64.efi should already be in the Oreon directory from grub2-install
-            grub_source = os.path.join(boot_target_dir, "grubx64.efi")
-            if not os.path.exists(grub_source):
-                return False, f"grubx64.efi not found at {grub_source} after grub2-install", None
-            print(f"Verified grubx64.efi exists at: {grub_source}")
             
         except Exception as e:
             return False, f"Failed to copy EFI files: {e}", None
