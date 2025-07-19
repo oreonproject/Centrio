@@ -3,21 +3,26 @@
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, GLib
+try:
+    from gi.repository import Gtk, Adw, GLib  # type: ignore
+except ImportError:
+    # Fallback for environments where gi might not be available
+    print("Warning: gi.repository could not be imported")
+    raise
 
-# Import Page classes (Reverted to relative imports)
-from .pages.welcome import WelcomePage
-from .pages.summary import SummaryPage
-from .pages.progress import ProgressPage
-from .pages.finished import FinishedPage
-from .pages.keyboard import KeyboardPage
-from .pages.language import LanguagePage
-from .pages.timedate import TimeDatePage
-from .pages.disk import DiskPage
-from .pages.network import NetworkPage
-from .pages.user import UserPage
-from .pages.payload import PayloadPage
-from .pages.bootloader import BootloaderPage
+# Import Page classes (Fixed to absolute imports)
+from pages.welcome import WelcomePage
+from pages.summary import SummaryPage
+from pages.progress import ProgressPage
+from pages.finished import FinishedPage
+from pages.keyboard import KeyboardPage
+from pages.language import LanguagePage
+from pages.timedate import TimeDatePage
+from pages.disk import DiskPage
+from pages.network import NetworkPage
+from pages.user import UserPage
+from pages.payload import PayloadPage
+from pages.bootloader import BootloaderPage
 
 class CentrioInstallerWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
@@ -31,7 +36,8 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
         self.final_config = {} # Stores final selected values passed back from pages
 
         self.set_title("Centrio Installer")
-        self.set_default_size(850, 650)
+        self.set_default_size(700, 700)  # Smaller default size for better screen fit
+        self.set_resizable(True)  # Allow window resizing
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_content(main_box)
         
@@ -40,9 +46,16 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
         self.toast_overlay.set_vexpand(True)
         main_box.append(self.toast_overlay)
 
-        # --- View Stack (inside the overlay) --- 
+        # --- Scrolled Window for content --- 
+        scrolled_window = Gtk.ScrolledWindow()
+        scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scrolled_window.set_vexpand(True)
+        scrolled_window.set_hexpand(True)
+        self.toast_overlay.set_child(scrolled_window)
+
+        # --- View Stack (inside the scrolled window) --- 
         self.view_stack = Adw.ViewStack()
-        self.toast_overlay.set_child(self.view_stack)
+        scrolled_window.set_child(self.view_stack)
 
         # --- Add pages to the stack --- 
         # Main flow pages

@@ -7,9 +7,9 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw
 
-from .base import BaseConfigurationPage
+from pages.base import BaseConfigurationPage
 # Use locale list getter
-from ..utils import ana_get_available_locales
+from utils import ana_get_available_locales
 # Removed D-Bus imports
 
 class LanguagePage(BaseConfigurationPage): # Renamed class slightly

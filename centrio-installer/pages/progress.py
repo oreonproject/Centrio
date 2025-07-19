@@ -12,7 +12,7 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib
 
 # Import backend functions
-from .. import backend
+import backend
 
 class ProgressPage(Gtk.Box):
     def __init__(self, **kwargs):
@@ -139,16 +139,41 @@ class ProgressPage(Gtk.Box):
             print(f"  Warning: Error listing mounts: {e}. Cannot automatically unmount.")
 
     def _execute_storage_setup(self, disk_config):
-        """Executes partitioning/formatting/mounting OR just mounting for manual."""
+        """Executes partitioning/formatting/mounting with support for enhanced disk options."""
         self.disk_config = disk_config # Store for potential unmount later
         method = disk_config.get("method")
         commands = disk_config.get("commands", [])
         partitions = disk_config.get("partitions", [])
         target_disks = disk_config.get("target_disks", [])
+        filesystem = disk_config.get("filesystem", "ext4")
+        dual_boot = disk_config.get("dual_boot", False)
+        preserve_efi = disk_config.get("preserve_efi", False)
+        
+        print(f"Storage setup: method={method}, filesystem={filesystem}, dual_boot={dual_boot}, preserve_efi={preserve_efi}")
 
-        if method == "AUTOMATIC" and target_disks:
+        # Handle new method names - map them to processing logic
+        if method in ["normal", "dual_boot"]:
+            # These are the new enhanced methods - treat as automatic partitioning
+            automatic_mode = True
+        elif method == "AUTOMATIC":
+            # Legacy method name - still supported
+            automatic_mode = True
+        elif method == "MANUAL":
+            automatic_mode = False
+        else:
+            self.installation_error = f"Invalid or missing partitioning method: {method}"
+            return False
+
+        if automatic_mode and target_disks:
             primary_disk = target_disks[0]
-            self._update_progress_text(f"Preparing disk {primary_disk}...", 0.01)
+            
+            if dual_boot:
+                if preserve_efi:
+                    self._update_progress_text(f"Preparing disk {primary_disk} for dual boot installation...", 0.01)
+                else:
+                    self._update_progress_text(f"Preparing disk {primary_disk} for dual boot (new EFI)...", 0.01)
+            else:
+                self._update_progress_text(f"Preparing disk {primary_disk} for clean installation...", 0.01)
             
             # --- Stop udisks2 --- 
             stop_success, stop_err = backend._stop_service("udisks2.service")
@@ -168,7 +193,11 @@ class ProgressPage(Gtk.Box):
                  print(f"LVM deactivation check complete for {primary_disk}.")
                  
             # --- Pre-emptive Unmount --- 
-            self._update_progress_text(f"Checking existing mounts on {primary_disk}...", 0.02)
+            if dual_boot and preserve_efi:
+                self._update_progress_text(f"Checking mounts on {primary_disk} (preserving EFI)...", 0.02)
+            else:
+                self._update_progress_text(f"Checking existing mounts on {primary_disk}...", 0.02)
+                
             mount_targets_to_check = set()
             device_paths_to_check = set([primary_disk])
             try:
@@ -187,13 +216,11 @@ class ProgressPage(Gtk.Box):
                 print(f"  Checking for mounts on paths: {list(device_paths_to_check)}")
                 for dev_path in device_paths_to_check:
                     findmnt_cmd = ["findmnt", "-n", "-r", "-o", "TARGET", f"--source={dev_path}"]
-                    # print(f"    Running: {' '.join(findmnt_cmd)}") # Verbose
                     result = subprocess.run(findmnt_cmd, capture_output=True, text=True, check=False, timeout=10)
                     if result.returncode == 0 and result.stdout.strip():
                         mount_points = [line.strip() for line in result.stdout.split('\n') if line.strip()]
                         print(f"    findmnt identified mount points for source {dev_path}: {mount_points}")
                         mount_targets_to_check.update(mount_points)
-                    # Ignore errors or no output for individual checks
 
             except Exception as e:
                 print(f"Warning: lsblk failed, proceeding with only {primary_disk}")
@@ -314,7 +341,7 @@ class ProgressPage(Gtk.Box):
             self._update_progress_text("Disk checks complete.", 0.04)
 
         # --- Execute Main Storage Actions ---
-        if method == "AUTOMATIC":
+        if automatic_mode:
             if not commands:
                 self.installation_error = "Automatic partitioning selected, but no commands were generated."
                 return False
@@ -380,7 +407,7 @@ class ProgressPage(Gtk.Box):
                     
             self._update_progress_text("Partitioning and formatting complete.", 0.30) # End fraction adjusted
             
-        elif method == "MANUAL":
+        elif not automatic_mode:
             print("Manual partitioning selected. Skipping wipefs/parted/mkfs commands.")
             self._update_progress_text("Using existing partitions...", 0.25)
             # Partitions should have been detected by DiskPage and passed in disk_config
@@ -528,31 +555,53 @@ class ProgressPage(Gtk.Box):
         return success
 
     def _install_packages(self, config_data):
-        """Installs packages using backend function."""
+        """Installs packages using enhanced backend function with full configuration support."""
         if self.stop_requested: return False, "Stop requested"
-        payload_config = config_data.get('payload', {})
-        payload_type = payload_config.get('payload_type', 'DNF') 
         
-        if payload_type != 'DNF':
-             self.installation_error = f"Unsupported payload type: {payload_type}" # Only DNF supported now
-             return False
+        payload_config = config_data.get('payload', {})
+        
+        # Build package configuration for enhanced installer
+        package_config = {
+            "packages": payload_config.get('packages', []),
+            "repositories": payload_config.get('repositories', []),
+            "flatpak_enabled": payload_config.get('flatpak_enabled', False),
+            "custom_packages": payload_config.get('custom_packages', []),
+            "minimal_install": payload_config.get('minimal_install', False),
+            "keep_cache": payload_config.get('keep_cache', True)
+        }
+        
+        # Log the configuration for debugging
+        print(f"Package installation config: {len(package_config['packages'])} packages, "
+              f"{len(package_config['repositories'])} repos, "
+              f"Flatpak: {package_config['flatpak_enabled']}, "
+              f"Minimal: {package_config['minimal_install']}")
              
         # Add message here before calling backend
-        self._update_progress_text(f"Starting package installation via {payload_type} (This may take a while)...", 0.35) 
+        self._update_progress_text("Starting enhanced package installation (This may take a while)...", 0.35) 
         
-        # Call backend function, passing the progress callback
-        success, err = backend.install_packages_dnf(
+        # Call enhanced backend function with full configuration
+        success, err = backend.install_packages_enhanced(
             self.target_root,
+            package_config,
             progress_callback=self._update_progress_text 
         )
         
-        # Note: Progress fractions inside install_packages_dnf range from 0.0 to 1.0,
+        # Note: Progress fractions inside install_packages_enhanced range from 0.0 to 1.0,
         # mapped to the overall progress range 0.35 -> 0.8 in _run_installation_steps scaling below.
-        # We just update the final message here.
         if success:
-            self._update_progress_text("Package installation complete.", 0.8) # Final fraction for this step
+            package_count = len(package_config['packages'])
+            features = []
+            if package_config['flatpak_enabled']:
+                features.append("Flatpak")
+            if package_config['minimal_install']:
+                features.append("Minimal")
+            if package_config['custom_packages']:
+                features.append(f"{len(package_config['custom_packages'])} custom packages")
+            
+            feature_text = f" with {', '.join(features)}" if features else ""
+            self._update_progress_text(f"Installed {package_count} packages{feature_text}.", 0.8)
         else:
-             self.installation_error = err # Error already set by backend ideally
+             self.installation_error = err
              
         return success
 

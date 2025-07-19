@@ -3,56 +3,357 @@
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw
+from gi.repository import Gtk, Adw, GLib
 
-from .base import BaseConfigurationPage
-# Removed D-Bus imports
-# from ..utils import dasbus, DBusError, dbus_available 
-# from ..constants import (...) 
+from pages.base import BaseConfigurationPage
+
+# Default package groups and packages
+DEFAULT_PACKAGE_GROUPS = {
+    "core": {
+        "name": "Core System",
+        "description": "Essential system packages (required)",
+        "packages": ["@core", "kernel", "grub2-efi-x64", "grub2-pc", "NetworkManager", "systemd-resolved"],
+        "required": True,
+        "selected": True
+    },
+    "desktop": {
+        "name": "Desktop Environment",
+        "description": "GNOME desktop environment and basic applications",
+        "packages": ["@gnome-desktop", "@base-x", "gnome-shell", "gdm", "gnome-terminal"],
+        "required": False,
+        "selected": True
+    },
+    "multimedia": {
+        "name": "Multimedia Support",
+        "description": "Audio, video, and graphics support",
+        "packages": ["pulseaudio", "gstreamer1-plugins-good", "gstreamer1-plugins-bad-free", "mesa-dri-drivers"],
+        "required": False,
+        "selected": True
+    },
+    "development": {
+        "name": "Development Tools",
+        "description": "Programming languages and development utilities",
+        "packages": ["gcc", "make", "git", "python3", "python3-pip", "nodejs", "npm"],
+        "required": False,
+        "selected": False
+    },
+    "productivity": {
+        "name": "Productivity Suite",
+        "description": "Office applications and productivity tools",
+        "packages": ["libreoffice", "firefox", "thunderbird", "gimp"],
+        "required": False,
+        "selected": False
+    },
+    "gaming": {
+        "name": "Gaming Support",
+        "description": "Steam and gaming-related packages",
+        "packages": ["steam", "lutris", "wine", "gamemode"],
+        "required": False,
+        "selected": False
+    }
+}
+
+# Common custom repositories
+COMMON_REPOSITORIES = {
+    "rpmfusion-free": {
+        "name": "RPM Fusion Free",
+        "description": "Additional free software packages",
+        "url": "https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm",
+        "enabled": False
+    },
+    "rpmfusion-nonfree": {
+        "name": "RPM Fusion Non-Free", 
+        "description": "Proprietary and patent-encumbered software",
+        "url": "https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm",
+        "enabled": False
+    },
+    "flathub": {
+        "name": "Flathub",
+        "description": "Flatpak application repository",
+        "url": "https://flathub.org/repo/flathub.flatpakrepo",
+        "enabled": True
+    }
+}
 
 class PayloadPage(BaseConfigurationPage):
-    """Page for Payload (Installation Source) Configuration (Placeholder)."""
+    """Enhanced page for package selection and software configuration."""
     def __init__(self, main_window, overlay_widget, **kwargs):
-        super().__init__(title="Installation Source", subtitle="Configure package source (Defaults Used)", main_window=main_window, overlay_widget=overlay_widget, **kwargs)
-        # Removed D-Bus proxy variables
-        self.payload_type = "DNF" # Assume DNF for now
-
-        # No D-Bus connection needed
-        # self._connect_dbus() 
-
-        # --- UI Elements (Informational Only) ---
-        info_group = Adw.PreferencesGroup()
-        self.add(info_group)
-        info_label = Gtk.Label(label=f"Using default payload type: {self.payload_type}.\n\nPackage selection and source repository configuration\nwill be handled automatically during the installation process.\n(No configuration needed here for this installer version)." )
-        info_label.set_wrap(True)
-        info_label.set_margin_top(12)
-        info_label.set_margin_bottom(12)
-        info_group.add(info_label)
-
-        # --- Confirmation Button --- 
-        button_group = Adw.PreferencesGroup()
-        self.add(button_group)
-        self.complete_button = Gtk.Button(label="Confirm Payload Choice")
-        self.complete_button.set_halign(Gtk.Align.CENTER)
-        self.complete_button.set_margin_top(24)
+        super().__init__(
+            title="Software Selection", 
+            subtitle="Choose packages and configure software sources", 
+            main_window=main_window, 
+            overlay_widget=overlay_widget, 
+            **kwargs
+        )
+        
+        # State variables
+        self.package_groups = DEFAULT_PACKAGE_GROUPS.copy()
+        self.custom_repositories = COMMON_REPOSITORIES.copy()
+        self.flatpak_enabled = True
+        self.custom_packages = []
+        self.oem_packages = []
+        self.oem_repo_url = ""
+        
+        self._build_ui()
+        
+    def _build_ui(self):
+        """Build the enhanced package selection UI."""
+        
+        # Package Groups Section
+        self.groups_section = Adw.PreferencesGroup(
+            title="Package Groups",
+            description="Select software categories to install"
+        )
+        self.add(self.groups_section)
+        
+        self._populate_package_groups()
+        
+        # Flatpak Support Section
+        self.flatpak_section = Adw.PreferencesGroup(
+            title="Application Store",
+            description="Configure Flatpak support for additional applications"
+        )
+        self.add(self.flatpak_section)
+        
+        self.flatpak_row = Adw.SwitchRow(
+            title="Enable Flatpak Support",
+            subtitle="Install Flatpak and add Flathub repository"
+        )
+        self.flatpak_row.set_active(self.flatpak_enabled)
+        self.flatpak_row.connect("notify::active", self.on_flatpak_toggled)
+        self.flatpak_section.add(self.flatpak_row)
+        
+        # Custom Repositories Section
+        self.repos_section = Adw.PreferencesGroup(
+            title="Additional Repositories",
+            description="Enable additional software repositories"
+        )
+        self.add(self.repos_section)
+        
+        self._populate_repositories()
+        
+        # OEM/Custom Software Section
+        self.oem_section = Adw.PreferencesGroup(
+            title="OEM &amp; Custom Software",
+            description="Add custom repositories and packages"
+        )
+        self.add(self.oem_section)
+        
+        # Custom repository URL
+        self.oem_repo_row = Adw.EntryRow(
+            title="Custom Repository URL"
+        )
+        self.oem_repo_row.connect("changed", self.on_oem_repo_changed)
+        self.oem_section.add(self.oem_repo_row)
+        
+        # Custom packages
+        self.custom_packages_row = Adw.EntryRow(
+            title="Additional Packages"
+        )
+        self.custom_packages_row.connect("changed", self.on_custom_packages_changed)
+        self.oem_section.add(self.custom_packages_row)
+        
+        # Advanced Options (Expandable)
+        self.advanced_section = Adw.PreferencesGroup(
+            title="Advanced Options",
+            description="Expert configuration options"
+        )
+        self.add(self.advanced_section)
+        
+        # Minimal installation toggle
+        self.minimal_row = Adw.SwitchRow(
+            title="Minimal Installation",
+            subtitle="Install only essential packages (overrides group selections)"
+        )
+        self.minimal_row.connect("notify::active", self.on_minimal_toggled)
+        self.advanced_section.add(self.minimal_row)
+        
+        # Package cache option
+        self.cache_row = Adw.SwitchRow(
+            title="Keep Package Cache",
+            subtitle="Preserve downloaded packages for faster reinstallation"
+        )
+        self.cache_row.set_active(True)
+        self.advanced_section.add(self.cache_row)
+        
+        # Confirm button
+        self.button_section = Adw.PreferencesGroup()
+        self.add(self.button_section)
+        
+        confirm_row = Adw.ActionRow(
+            title="Confirm Software Selection",
+            subtitle="Review and apply your package choices"
+        )
+        self.complete_button = Gtk.Button(label="Apply Software Plan")
+        self.complete_button.set_valign(Gtk.Align.CENTER)
         self.complete_button.add_css_class("suggested-action")
-        self.complete_button.connect("clicked", self.apply_settings_and_return) 
-        self.complete_button.set_sensitive(True) # Always enabled as it's just confirmation
-        button_group.add(self.complete_button)
+        self.complete_button.connect("clicked", self.apply_settings_and_return)
+        confirm_row.add_suffix(self.complete_button)
+        self.button_section.add(confirm_row)
         
-    # Removed _connect_dbus method
+    def _populate_package_groups(self):
+        """Populate the package groups section."""
+        for group_id, group_info in self.package_groups.items():
+            row = Adw.SwitchRow(
+                title=group_info["name"],
+                subtitle=group_info["description"]
+            )
             
-    def connect_and_fetch_data(self):
-        # Nothing to fetch in this placeholder version
-         pass 
-         
-    def apply_settings_and_return(self, button):
-        """Confirms the intent to use the default payload type."""
-        print(f"Payload configuration confirmed: Using type '{self.payload_type}'")
-        self.show_toast(f"Default payload ({self.payload_type}) confirmed.")
+            if group_info["required"]:
+                row.set_sensitive(False)
+                row.set_subtitle(group_info["description"] + " (required)")
+            
+            row.set_active(group_info["selected"])
+            row.connect("notify::active", self.on_group_toggled, group_id)
+            self.groups_section.add(row)
+            
+    def _populate_repositories(self):
+        """Populate the repositories section."""
+        for repo_id, repo_info in self.custom_repositories.items():
+            row = Adw.SwitchRow(
+                title=repo_info["name"],
+                subtitle=repo_info["description"]
+            )
+            row.set_active(repo_info["enabled"])
+            row.connect("notify::active", self.on_repo_toggled, repo_id)
+            self.repos_section.add(row)
+            
+    def on_group_toggled(self, switch_row, pspec, group_id):
+        """Handle package group toggle."""
+        is_active = switch_row.get_active()
+        if group_id in self.package_groups:
+            self.package_groups[group_id]["selected"] = is_active
+            print(f"Package group '{group_id}' {'enabled' if is_active else 'disabled'}")
+            
+    def on_repo_toggled(self, switch_row, pspec, repo_id):
+        """Handle repository toggle."""
+        is_active = switch_row.get_active()
+        if repo_id in self.custom_repositories:
+            self.custom_repositories[repo_id]["enabled"] = is_active
+            print(f"Repository '{repo_id}' {'enabled' if is_active else 'disabled'}")
+            
+    def on_flatpak_toggled(self, switch_row, pspec):
+        """Handle Flatpak toggle."""
+        self.flatpak_enabled = switch_row.get_active()
+        print(f"Flatpak support {'enabled' if self.flatpak_enabled else 'disabled'}")
         
-        # Pass back the intended payload type
+    def on_oem_repo_changed(self, entry_row):
+        """Handle custom repository URL change."""
+        self.oem_repo_url = entry_row.get_text().strip()
+        print(f"Custom repository URL: {self.oem_repo_url}")
+        
+    def on_custom_packages_changed(self, entry_row):
+        """Handle custom packages list change."""
+        text = entry_row.get_text().strip()
+        self.custom_packages = [pkg.strip() for pkg in text.split() if pkg.strip()]
+        print(f"Custom packages: {self.custom_packages}")
+        
+    def on_minimal_toggled(self, switch_row, pspec):
+        """Handle minimal installation toggle."""
+        is_minimal = switch_row.get_active()
+        
+        # Disable group selections if minimal is enabled
+        for i in range(self.groups_section.get_row_at_index(0) is not None and 10 or 0):
+            row = self.groups_section.get_row_at_index(i)
+            if row and hasattr(row, 'set_sensitive'):
+                # Don't disable required groups
+                group_ids = list(self.package_groups.keys())
+                if i < len(group_ids):
+                    group_id = group_ids[i]
+                    if not self.package_groups[group_id]["required"]:
+                        row.set_sensitive(not is_minimal)
+        
+        print(f"Minimal installation {'enabled' if is_minimal else 'disabled'}")
+        
+    def _get_selected_packages(self):
+        """Get the complete list of packages to install."""
+        packages = []
+        
+        # Add packages from selected groups
+        for group_id, group_info in self.package_groups.items():
+            if group_info["selected"] or group_info["required"]:
+                packages.extend(group_info["packages"])
+        
+        # Add custom packages
+        packages.extend(self.custom_packages)
+        
+        # Add OEM packages if any
+        packages.extend(self.oem_packages)
+        
+        # Add Flatpak if enabled
+        if self.flatpak_enabled:
+            packages.extend(["flatpak", "xdg-desktop-portal", "xdg-desktop-portal-gtk"])
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_packages = []
+        for pkg in packages:
+            if pkg not in seen:
+                seen.add(pkg)
+                unique_packages.append(pkg)
+                
+        return unique_packages
+        
+    def _get_enabled_repositories(self):
+        """Get the list of repositories to enable."""
+        enabled_repos = []
+        
+        for repo_id, repo_info in self.custom_repositories.items():
+            if repo_info["enabled"]:
+                enabled_repos.append({
+                    "id": repo_id,
+                    "name": repo_info["name"],
+                    "url": repo_info["url"]
+                })
+        
+        # Add custom OEM repository if provided
+        if self.oem_repo_url:
+            enabled_repos.append({
+                "id": "oem_custom",
+                "name": "OEM Custom Repository",
+                "url": self.oem_repo_url
+            })
+            
+        return enabled_repos
+        
+    def apply_settings_and_return(self, button):
+        """Apply the software configuration and return to summary."""
+        print(f"--- Apply Software Settings START ---")
+        
+        selected_packages = self._get_selected_packages()
+        enabled_repos = self._get_enabled_repositories()
+        
+        print(f"  Selected packages ({len(selected_packages)}): {selected_packages[:10]}{'...' if len(selected_packages) > 10 else ''}")
+        print(f"  Enabled repositories: {[r['id'] for r in enabled_repos]}")
+        print(f"  Flatpak enabled: {self.flatpak_enabled}")
+        
+        # Build configuration data
         config_values = {
-            "payload_type": self.payload_type,
+            "package_groups": {gid: ginfo["selected"] for gid, ginfo in self.package_groups.items()},
+            "packages": selected_packages,
+            "repositories": enabled_repos,
+            "flatpak_enabled": self.flatpak_enabled,
+            "custom_packages": self.custom_packages,
+            "oem_repo_url": self.oem_repo_url,
+            "minimal_install": self.minimal_row.get_active(),
+            "keep_cache": self.cache_row.get_active()
         }
+        
+        # Show confirmation
+        package_count = len(selected_packages)
+        repo_count = len(enabled_repos)
+        features = []
+        
+        if self.flatpak_enabled:
+            features.append("Flatpak")
+        if config_values["minimal_install"]:
+            features.append("Minimal")
+        if self.custom_packages:
+            features.append(f"{len(self.custom_packages)} custom packages")
+            
+        feature_text = f" ({', '.join(features)})" if features else ""
+        
+        self.show_toast(f"Software plan: {package_count} packages, {repo_count} repositories{feature_text}")
+        
+        print("Software configuration confirmed. Returning to summary.")
         super().mark_complete_and_return(button, config_values=config_values) 

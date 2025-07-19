@@ -12,43 +12,81 @@ class SummaryPage(Adw.PreferencesPage):
         self.main_window = main_window
         self.config_rows = {}
 
+        # --- Header Section ---
+        header_group = Adw.PreferencesGroup()
+        self.add(header_group)
+        
+        status_row = Adw.ActionRow(
+            title="Installation Configuration",
+            subtitle="Review and complete all required settings before proceeding"
+        )
+        status_icon = Gtk.Image.new_from_icon_name("emblem-system-symbolic")
+        status_row.add_prefix(status_icon)
+        header_group.add(status_row)
+
         # --- Localization Group ---
-        loc_group = Adw.PreferencesGroup(title="Localization")
+        loc_group = Adw.PreferencesGroup(
+            title="Localization &amp; Input",
+            description="Language, keyboard, and regional settings"
+        )
         self.add(loc_group)
-        self._add_config_row(loc_group, "keyboard", "Keyboard", "Keyboard layout", True)
+        self._add_config_row(loc_group, "keyboard", "Keyboard Layout", "Configure keyboard input method", True)
         self._add_config_row(loc_group, "language", "System Language", "Set the default system locale", False)
 
-        # --- System Group ---
-        sys_group = Adw.PreferencesGroup(title="System")
+        # --- System Configuration Group ---
+        sys_group = Adw.PreferencesGroup(
+            title="System Configuration", 
+            description="Core system and hardware settings"
+        )
         self.add(sys_group)
-        self._add_config_row(sys_group, "timedate", "Time &amp; Date", "Timezone and time settings", True)
-        self._add_config_row(sys_group, "disk", "Installation Destination", "Disk selection and partitioning", True)
-        self._add_config_row(sys_group, "network", "Network &amp; Host Name", "Network configuration", True)
-        # Add Payload row (required)
-        self._add_config_row(sys_group, "payload", "Installation Source", "Package source selection", True)
-        # Add Bootloader row (required)
-        self._add_config_row(sys_group, "bootloader", "Bootloader", "Bootloader configuration", True)
+        self._add_config_row(sys_group, "timedate", "Time &amp; Date", "Timezone and time synchronization", True)
+        self._add_config_row(sys_group, "network", "Network &amp; Hostname", "Network configuration and system name", True)
+
+        # --- Storage Group ---
+        storage_group = Adw.PreferencesGroup(
+            title="Storage &amp; Installation Target",
+            description="Disk partitioning and filesystem configuration"
+        )
+        self.add(storage_group)
+        self._add_config_row(storage_group, "disk", "Installation Destination", "Disk selection and partitioning method", True)
+        self._add_config_row(storage_group, "bootloader", "Bootloader Configuration", "Boot manager installation settings", True)
+
+        # --- Software Group ---
+        software_group = Adw.PreferencesGroup(
+            title="Software Selection",
+            description="Package groups and application configuration"
+        )
+        self.add(software_group)
+        self._add_config_row(software_group, "payload", "Software Packages", "Package selection and repositories", True)
 
         # --- User Settings Group ---
-        user_group = Adw.PreferencesGroup(title="User Settings")
+        user_group = Adw.PreferencesGroup(
+            title="User Accounts",
+            description="User account creation and authentication"
+        )
         self.add(user_group)
-        self._add_config_row(user_group, "user", "User Creation", "Create user accounts", False)
+        self._add_config_row(user_group, "user", "User Creation", "Create administrator and user accounts", False)
 
-        # Add informational text inside a group
-        info_group = Adw.PreferencesGroup() 
-        self.add(info_group) 
-        info_label = Gtk.Label(label="\nPlease configure the items marked with ⚠ before proceeding.")
-        info_label.set_halign(Gtk.Align.CENTER)
-        info_label.set_margin_top(12)
-        info_label.set_margin_bottom(12) # Add bottom margin too
-        info_group.add(info_label)
+        # --- Installation Ready Status ---
+        self.status_group = Adw.PreferencesGroup(
+            title="Installation Status"
+        )
+        self.add(self.status_group)
+        
+        self.ready_status_row = Adw.ActionRow(
+            title="Configuration Status",
+            subtitle="Complete required settings to proceed with installation"
+        )
+        self.status_icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
+        self.ready_status_row.add_prefix(self.status_icon)
+        self.status_group.add(self.ready_status_row)
 
     def _add_config_row(self, group, key, title, subtitle_base, required):
         row = Adw.ActionRow(title=title)
         row.set_activatable(True)
         row.connect("activated", self.on_row_activated, key)
+        
         # Initialize config_state in main window if not already present
-        # This ensures even rows added later get tracked
         if key not in self.main_window.config_state:
              self.main_window.config_state[key] = False
              
@@ -59,6 +97,7 @@ class SummaryPage(Adw.PreferencesPage):
             "icon_widget": None 
         }
         group.add(row)
+        
         # Update row status based on initial state from main_window
         self.update_row_status(key, self.main_window.config_state.get(key, False))
 
@@ -69,40 +108,70 @@ class SummaryPage(Adw.PreferencesPage):
         if key not in self.config_rows:
             print(f"Warning: Attempted to update status for unknown row key: {key}")
             return
+            
         config = self.config_rows[key]
         row = config["row"]
         subtitle = config["subtitle_base"]
         icon_name = None
         new_icon_widget = None
-        tooltip_text = None # For debugging
 
         # Determine icon and subtitle based on state
         if is_complete:
-            row.set_subtitle(f"{subtitle} (Completed)")
-            icon_name = "emblem-ok-symbolic"
-            tooltip_text = "Completed"
+            row.set_subtitle(f"{subtitle} (Configured)")
+            icon_name = "object-select-symbolic"
+            row.add_css_class("success")
+            row.remove_css_class("warning")
         elif config["required"]:
-            row.set_subtitle(f"{subtitle} (Configuration required)")
+            row.set_subtitle(f"{subtitle} (Required)")
             icon_name = "dialog-warning-symbolic"
-            tooltip_text = "Configuration Required"
+            row.add_css_class("warning")
+            row.remove_css_class("success")
         else:
             row.set_subtitle(f"{subtitle} (Optional)")
-            # No icon for optional/incomplete
+            row.remove_css_class("warning")
+            row.remove_css_class("success")
 
         # Remove the previous icon widget if it exists
         if config["icon_widget"]:
             try:
                  row.remove(config["icon_widget"])
             except Exception as e:
-                 # This can sometimes happen if the widget is already removed or parented elsewhere
                  print(f"Warning: Failed to remove previous icon for row '{key}': {e}")
             config["icon_widget"] = None
         
         # Add the new icon if one is needed
         if icon_name:
-            # print(f"Adding icon '{icon_name}' to row '{key}'") # Diagnostic print
             new_icon_widget = Gtk.Image.new_from_icon_name(icon_name)
-            if tooltip_text:
-                 new_icon_widget.set_tooltip_text(tooltip_text) # Add tooltip for debugging
             row.add_suffix(new_icon_widget)
             config["icon_widget"] = new_icon_widget
+            
+        # Update overall installation status
+        self._update_installation_status()
+    
+    def _update_installation_status(self):
+        """Update the overall installation readiness status."""
+        # Only update if the status row has been created
+        if not hasattr(self, 'ready_status_row') or not self.ready_status_row:
+            return
+            
+        required_keys = [key for key, config in self.config_rows.items() if config["required"]]
+        completed_required = [key for key in required_keys if self.main_window.config_state.get(key, False)]
+        
+        total_required = len(required_keys)
+        completed_count = len(completed_required)
+        
+        if completed_count == total_required:
+            # All required items completed
+            self.ready_status_row.set_title("Ready for Installation")
+            self.ready_status_row.set_subtitle(f"All required settings configured ({completed_count}/{total_required})")
+            self.status_icon.set_from_icon_name("object-select-symbolic")
+            self.ready_status_row.add_css_class("success")
+            self.ready_status_row.remove_css_class("warning")
+        else:
+            # Still missing required items
+            missing_count = total_required - completed_count
+            self.ready_status_row.set_title("Configuration Incomplete")
+            self.ready_status_row.set_subtitle(f"{missing_count} required setting(s) remaining ({completed_count}/{total_required})")
+            self.status_icon.set_from_icon_name("dialog-warning-symbolic")
+            self.ready_status_row.add_css_class("warning")
+            self.ready_status_row.remove_css_class("success")

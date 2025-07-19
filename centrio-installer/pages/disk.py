@@ -10,7 +10,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib
 
-from .base import BaseConfigurationPage
+from pages.base import BaseConfigurationPage
 # D-Bus imports are no longer needed here
 # from ..utils import dasbus, DBusError, dbus_available 
 # from ..constants import (...) 
@@ -26,46 +26,49 @@ def format_bytes(size_bytes):
         return f"{mb:.1f} MiB"
     return f"{gb:.1f} GiB"
 
-# --- Functions to Generate Partitioning Commands --- 
+# --- Enhanced Partitioning Command Generators ---
 
 def generate_wipefs_command(disk_path):
     """Generates the wipefs command for a disk."""
     return ["wipefs", "-a", disk_path]
 
-def generate_gpt_commands(disk_path, efi_size_mb=512):
-    """Generates parted commands for a basic GPT layout (EFI + Root)."""
+def generate_gpt_commands(disk_path, efi_size_mb=512, filesystem="btrfs", dual_boot=False, preserve_efi=False):
+    """Generates parted commands for GPT layout with customizable filesystem and dual boot support."""
     commands = []
-    # Ensure disk path is provided
     if not disk_path:
         print("ERROR: generate_gpt_commands called without disk_path")
         return []
 
     # Define partition start and end points
     efi_start = "1MiB"
-    efi_end = f"{efi_size_mb + 1}MiB" # Add 1 MiB buffer from start
-    root_start = efi_end
-    root_end = "100%" # Use remaining space
+    efi_end = f"{efi_size_mb + 1}MiB"
     
-    # Make GPT table
-    commands.append(["parted", "-s", disk_path, "mklabel", "gpt"])
-    # Make EFI partition
-    commands.append(["parted", "-s", disk_path, "mkpart", "\"EFI System Partition\"", "fat32", efi_start, efi_end])
-    # Set flags on EFI partition (part# 1)
-    commands.append(["parted", "-s", disk_path, "set", "1", "boot", "on"])
-    commands.append(["parted", "-s", disk_path, "set", "1", "esp", "on"])
-    # Make root partition
-    commands.append(["parted", "-s", disk_path, "mkpart", "\"Linux filesystem\"", "ext4", root_start, root_end])
+    if dual_boot and preserve_efi:
+        # Don't create new GPT table or EFI partition if preserving existing
+        root_start = efi_end  # Still calculate from expected EFI end
+        root_end = "100%"
+        commands.append(["parted", "-s", disk_path, "mkpart", "\"Linux filesystem\"", filesystem, root_start, root_end])
+    else:
+        # Normal installation - create full layout
+        root_start = efi_end
+        root_end = "100%"
+        
+        # Make GPT table
+        commands.append(["parted", "-s", disk_path, "mklabel", "gpt"])
+        # Make EFI partition
+        commands.append(["parted", "-s", disk_path, "mkpart", "\"EFI System Partition\"", "fat32", efi_start, efi_end])
+        # Set flags on EFI partition (part# 1)
+        commands.append(["parted", "-s", disk_path, "set", "1", "boot", "on"])
+        commands.append(["parted", "-s", disk_path, "set", "1", "esp", "on"])
+        # Make root partition
+        commands.append(["parted", "-s", disk_path, "mkpart", "\"Linux filesystem\"", filesystem, root_start, root_end])
     
     return commands
 
-def generate_mkfs_commands(disk_path, partition_prefix=""):
-    """Generates mkfs commands for the partitions created by generate_gpt_commands.
-    Assumes standard partition naming (e.g., /dev/sda1, /dev/sda2).
-    partition_prefix is used for devices like nvme (e.g., 'p').
-    """
+def generate_mkfs_commands(disk_path, filesystem="btrfs", partition_prefix="", dual_boot=False, preserve_efi=False):
+    """Generates mkfs commands for partitions with customizable filesystem type."""
     commands = []
     # Determine partition device names
-    # Handle drive letters vs nvme style
     if "nvme" in disk_path:
         part1 = f"{disk_path}{partition_prefix}1"
         part2 = f"{disk_path}{partition_prefix}2"
@@ -73,10 +76,20 @@ def generate_mkfs_commands(disk_path, partition_prefix=""):
         part1 = f"{disk_path}1"
         part2 = f"{disk_path}2"
 
-    # Format EFI partition (part# 1)
-    commands.append(["mkfs.vfat", "-F32", part1])
-    # Format root partition (part# 2)
-    commands.append(["mkfs.ext4", "-F", part2]) # -F forces overwrite
+    if not (dual_boot and preserve_efi):
+        # Format EFI partition only if not preserving existing
+        commands.append(["mkfs.vfat", "-F32", part1])
+    
+    # Format root partition with selected filesystem
+    if filesystem == "ext4":
+        commands.append(["mkfs.ext4", "-F", part2])
+    elif filesystem == "btrfs":
+        commands.append(["mkfs.btrfs", "-f", part2])
+    elif filesystem == "xfs":
+        commands.append(["mkfs.xfs", "-f", part2])
+    else:
+        # Fallback to ext4
+        commands.append(["mkfs.ext4", "-F", part2])
     
     return commands
 
@@ -86,7 +99,6 @@ def get_host_mounts():
     """Gets currently mounted filesystems on the host."""
     mounts = {}
     try:
-        # Use findmnt for reliable mount info, JSON output
         cmd = ["findmnt", "-J", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
         mount_data = json.loads(result.stdout)
@@ -95,9 +107,8 @@ def get_host_mounts():
                 source = fs.get("source")
                 target = fs.get("target")
                 if source and target:
-                    # Store source device (e.g., /dev/sda1, /dev/mapper/vg-lv)
                     mounts[target] = source 
-        print(f"Detected host mounts: {mounts}") # Log detected mounts
+        print(f"Detected host mounts: {mounts}")
         return mounts
     except Exception as e:
         print(f"Warning: Failed to get host mounts using findmnt: {e}")
@@ -107,97 +118,280 @@ def get_host_lvm_pvs():
     """Gets active LVM Physical Volumes on the host."""
     pvs = set()
     try:
-        # Get PV names
         cmd = ["pvs", "--noheadings", "-o", "pv_name"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
         for line in result.stdout.splitlines():
             pv_name = line.strip()
             if pv_name:
-                # Resolve device path if it's a symlink (e.g., /dev/dm-*)
                 try:
                     real_path = os.path.realpath(pv_name)
                     pvs.add(real_path)
                 except Exception:
-                    pvs.add(pv_name) # Add original if realpath fails
-        print(f"Detected host LVM PVs: {pvs}") # Log detected PVs
+                    pvs.add(pv_name)
+        print(f"Detected host LVM PVs: {pvs}")
         return pvs
     except Exception as e:
         print(f"Warning: Failed to get host LVM PVs: {e}")
         return set()
 
+def detect_existing_efi_partitions():
+    """Detect existing EFI system partitions that could be reused for dual boot."""
+    efi_partitions = []
+    try:
+        cmd = ["lsblk", "-J", "-o", "PATH,FSTYPE,PARTTYPE,SIZE"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
+        lsblk_data = json.loads(result.stdout)
+        
+        def scan_device(device):
+            path = device.get("path")
+            fstype = device.get("fstype")
+            parttype = device.get("parttype")
+            size = device.get("size")
+            
+            # Check if this is an EFI System Partition
+            is_efi = (
+                fstype == "vfat" and 
+                parttype == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"  # EFI System Partition GUID
+            ) or (
+                fstype == "vfat" and path and "efi" in path.lower()
+            )
+            
+            if is_efi and path:
+                efi_partitions.append({
+                    "path": path,
+                    "size": size,
+                    "fstype": fstype
+                })
+            
+            # Recursively check children
+            for child in device.get("children", []):
+                scan_device(child)
+        
+        for device in lsblk_data.get("blockdevices", []):
+            scan_device(device)
+            
+    except Exception as e:
+        print(f"Warning: Failed to detect EFI partitions: {e}")
+    
+    return efi_partitions
+
 class DiskPage(BaseConfigurationPage):
     def __init__(self, main_window, overlay_widget, **kwargs):
-        super().__init__(title="Installation Destination", subtitle="Select disks and configure partitioning", main_window=main_window, overlay_widget=overlay_widget, **kwargs)
+        super().__init__(title="Installation Destination", subtitle="Configure disk partitioning and filesystem", main_window=main_window, overlay_widget=overlay_widget, **kwargs)
         
         # State variables
-        self.detected_disks = [] # List of dicts {name, path, size, model}
-        self.selected_disks = set() # Set of disk paths (e.g., /dev/sda)
+        self.detected_disks = []
+        self.selected_disks = set()
         self.scan_completed = False
-        self.partitioning_method = None # "AUTOMATIC" or "MANUAL" or None
-        self.disk_widgets = {} # Map path to row/check widgets
+        self.partitioning_method = None
+        self.filesystem_type = "btrfs"
+        self.dual_boot_enabled = False
+        self.preserve_efi = False
+        self.selected_efi_partition = None
+        self.custom_format_enabled = False
+        self.disk_widgets = {}
+        self.efi_partitions = []
         
-        # --- Add Initial Widgets --- 
+        self._build_ui()
+            
+    def _build_ui(self):
+        """Build the enhanced disk configuration UI."""
+        
+        # Initial scan section
         info_group = Adw.PreferencesGroup()
         self.add(info_group)
-        info_label = Gtk.Label(label="Click \"Scan for Disks\" to detect storage devices.")
-        info_label.set_margin_top(12)
-        info_label.set_margin_bottom(12)
-        info_label.set_wrap(True) 
-        info_group.add(info_label)
         
-        scan_button_group = Adw.PreferencesGroup()
-        self.add(scan_button_group)
-        self.scan_button = Gtk.Button(label="Scan for Disks") # Store ref
-        self.scan_button.set_halign(Gtk.Align.CENTER)
+        scan_row = Adw.ActionRow(
+            title="Storage Device Detection",
+            subtitle="Scan for available storage devices"
+        )
+        self.scan_button = Gtk.Button(label="Scan for Disks")
+        self.scan_button.set_valign(Gtk.Align.CENTER)
+        self.scan_button.add_css_class("suggested-action")
         self.scan_button.connect("clicked", self.scan_for_disks)
-        scan_button_group.add(self.scan_button)
+        scan_row.add_suffix(self.scan_button)
+        info_group.add(scan_row)
 
-        # --- Disk List (Initially Hidden) ---
-        self.disk_list_group = Adw.PreferencesGroup(title="Detected Disks")
-        self.disk_list_group.set_description("Select the disk(s) for installation.")
-        self.disk_list_group.set_visible(False) # Hide until scan is complete
+        # Disk selection section
+        self.disk_list_group = Adw.PreferencesGroup(title="Available Disks")
+        self.disk_list_group.set_description("Select disk(s) for installation")
+        self.disk_list_group.set_visible(False)
         self.add(self.disk_list_group)
-        # We will add a ListBox here during scan completion
-        self.disk_list_box = Gtk.ListBox()
-        self.disk_list_box.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.disk_list_box.set_visible(False) # Also hide list box initially
-        self.disk_list_group.add(self.disk_list_box)
-
-        # --- Partitioning Options (Initially Hidden) ---
-        self.part_group = Adw.PreferencesGroup(title="Storage Configuration")
-        self.part_group.set_description("Choose a partitioning method.")
-        self.part_group.set_visible(False) # Hide until scan is complete
-        self.add(self.part_group)
         
-        # Radio buttons for partitioning method
-        self.auto_part_check = Gtk.CheckButton(label="Automatic Partitioning")
-        self.auto_part_check.set_tooltip_text("Use selected disk(s) with a default layout")
-        self.manual_part_check = Gtk.CheckButton(label="Manual Partitioning", group=self.auto_part_check)
-        self.manual_part_check.set_sensitive(False) # Disable manual for now
+        # Installation mode section
+        self.mode_group = Adw.PreferencesGroup(title="Installation Mode")
+        self.mode_group.set_visible(False)
+        self.add(self.mode_group)
         
-        self.auto_part_check.connect("toggled", self.on_partitioning_method_toggled)
-        # manual_part_check.connect("toggled", self.on_partitioning_method_toggled)
+        # Normal installation
+        self.normal_install_row = Adw.ActionRow(
+            title="Clean Installation",
+            subtitle="Erase disk and install Oreon (recommended)"
+        )
+        self.normal_radio = Gtk.CheckButton()
+        self.normal_radio.set_valign(Gtk.Align.CENTER)
+        self.normal_radio.connect("toggled", self.on_install_mode_changed, "normal")
+        self.normal_install_row.add_suffix(self.normal_radio)
+        self.normal_install_row.set_activatable_widget(self.normal_radio)
+        self.mode_group.add(self.normal_install_row)
         
-        part_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        part_box.append(self.auto_part_check)
-        part_box.append(self.manual_part_check)
-        self.part_group.add(part_box)
-
-        # --- Confirmation Button --- 
-        button_group = Adw.PreferencesGroup()
-        self.add(button_group)
-        # Label reflects confirming the plan
-        self.complete_button = Gtk.Button(label="Confirm Storage Plan") 
-        self.complete_button.set_halign(Gtk.Align.CENTER)
-        self.complete_button.set_margin_top(24)
+        # Dual boot installation
+        self.dual_boot_row = Adw.ActionRow(
+            title="Dual Boot Installation",
+            subtitle="Install alongside existing operating system"
+        )
+        self.dual_boot_radio = Gtk.CheckButton(group=self.normal_radio)
+        self.dual_boot_radio.set_valign(Gtk.Align.CENTER)
+        self.dual_boot_radio.connect("toggled", self.on_install_mode_changed, "dual_boot")
+        self.dual_boot_row.add_suffix(self.dual_boot_radio)
+        self.dual_boot_row.set_activatable_widget(self.dual_boot_radio)
+        self.mode_group.add(self.dual_boot_row)
+        
+        # EFI partition selection (for dual boot)
+        self.efi_group = Adw.PreferencesGroup(title="EFI System Partition")
+        self.efi_group.set_description("Select existing EFI partition to preserve")
+        self.efi_group.set_visible(False)
+        self.add(self.efi_group)
+        
+        # Filesystem selection section
+        self.fs_group = Adw.PreferencesGroup(title="Filesystem Configuration")
+        self.fs_group.set_visible(False)
+        self.add(self.fs_group)
+        
+        # Filesystem type selection
+        fs_row = Adw.ComboRow(title="Root Filesystem Type")
+        fs_row.set_subtitle("Choose the filesystem for the root partition")
+        fs_model = Gtk.StringList()
+        fs_model.append("ext4")
+        fs_model.append("btrfs (default)")
+        fs_model.append("xfs")
+        fs_row.set_model(fs_model)
+        fs_row.set_selected(1)  # Default to btrfs
+        fs_row.connect("notify::selected", self.on_filesystem_changed)
+        self.fs_group.add(fs_row)
+        
+        # Custom formatting toggle
+        self.custom_format_row = Adw.SwitchRow(
+            title="Custom Formatting Options",
+            subtitle="Enable advanced formatting and partition options"
+        )
+        self.custom_format_row.connect("notify::active", self.on_custom_format_toggled)
+        self.fs_group.add(self.custom_format_row)
+        
+        # Advanced options (shown when custom formatting is enabled)
+        self.advanced_group = Adw.PreferencesGroup(title="Advanced Options")
+        self.advanced_group.set_visible(False)
+        self.add(self.advanced_group)
+        
+        # EFI partition size (for custom formatting)
+        self.efi_size_row = Adw.SpinRow(
+            title="EFI Partition Size",
+            subtitle="Size in MB for the EFI system partition"
+        )
+        adjustment = Gtk.Adjustment(value=512, lower=100, upper=2048, step_increment=50)
+        self.efi_size_row.set_adjustment(adjustment)
+        self.advanced_group.add(self.efi_size_row)
+        
+        # Confirm button
+        self.button_group = Adw.PreferencesGroup()
+        self.add(self.button_group)
+        
+        confirm_row = Adw.ActionRow(
+            title="Confirm Storage Configuration",
+            subtitle="Review and apply your storage settings"
+        )
+        self.complete_button = Gtk.Button(label="Apply Storage Plan")
+        self.complete_button.set_valign(Gtk.Align.CENTER)
         self.complete_button.add_css_class("suggested-action")
-        self.complete_button.connect("clicked", self.apply_settings_and_return) 
-        self.complete_button.set_sensitive(False) # Enable after scan, disk selection, and method choice
-        button_group.add(self.complete_button)
+        self.complete_button.connect("clicked", self.apply_settings_and_return)
+        self.complete_button.set_sensitive(False)
+        confirm_row.add_suffix(self.complete_button)
+        self.button_group.add(confirm_row)
 
         # No _connect_dbus needed anymore
         # self._connect_dbus() 
             
+    def on_install_mode_changed(self, button, mode):
+        """Handle installation mode selection."""
+        if not button.get_active():
+            return
+            
+        if mode == "normal":
+            self.dual_boot_enabled = False
+            self.preserve_efi = False
+            self.efi_group.set_visible(False)
+            print("Installation mode: Normal (clean installation)")
+        elif mode == "dual_boot":
+            self.dual_boot_enabled = True
+            self.efi_partitions = detect_existing_efi_partitions()
+            if self.efi_partitions:
+                self._populate_efi_partitions()
+                self.efi_group.set_visible(True)
+                print(f"Installation mode: Dual boot (found {len(self.efi_partitions)} EFI partitions)")
+            else:
+                self.show_toast("No existing EFI partitions found for dual boot")
+                self.normal_radio.set_active(True)  # Fall back to normal
+                return
+        
+        self.partitioning_method = mode
+        self.update_complete_button_state()
+    
+    def on_filesystem_changed(self, combo_row, pspec):
+        """Handle filesystem type selection."""
+        selected = combo_row.get_selected()
+        fs_types = ["ext4", "btrfs", "xfs"]
+        self.filesystem_type = fs_types[selected] if selected < len(fs_types) else "ext4"
+        print(f"Selected filesystem: {self.filesystem_type}")
+        self.update_complete_button_state()
+    
+    def on_custom_format_toggled(self, switch_row, pspec):
+        """Handle custom formatting toggle."""
+        self.custom_format_enabled = switch_row.get_active()
+        self.advanced_group.set_visible(self.custom_format_enabled)
+        print(f"Custom formatting: {self.custom_format_enabled}")
+    
+    def on_efi_partition_selected(self, button, partition_path):
+        """Handle EFI partition selection for dual boot."""
+        if button.get_active():
+            self.selected_efi_partition = partition_path
+            self.preserve_efi = True
+            print(f"Selected EFI partition: {partition_path}")
+        else:
+            if self.selected_efi_partition == partition_path:
+                self.selected_efi_partition = None
+                self.preserve_efi = False
+        self.update_complete_button_state()
+    
+    def _populate_efi_partitions(self):
+        """Populate the EFI partition selection UI."""
+        # Clear existing rows
+        # In GTK 4, we need to remove rows differently
+        for widget in list(self.efi_group):
+            self.efi_group.remove(widget)
+        
+        efi_radio_group = None
+        for i, efi_part in enumerate(self.efi_partitions):
+            path = efi_part["path"]
+            size_str = format_bytes(efi_part["size"]) if efi_part["size"] else "Unknown"
+            
+            row = Adw.ActionRow(
+                title=f"EFI Partition: {path}",
+                subtitle=f"Size: {size_str}, Type: {efi_part['fstype']}"
+            )
+            
+            radio = Gtk.CheckButton() if i == 0 else Gtk.CheckButton(group=efi_radio_group)
+            if i == 0:
+                efi_radio_group = radio
+                radio.set_active(True)  # Select first by default
+                self.selected_efi_partition = path
+                self.preserve_efi = True
+            
+            radio.set_valign(Gtk.Align.CENTER)
+            radio.connect("toggled", self.on_efi_partition_selected, path)
+            row.add_suffix(radio)
+            row.set_activatable_widget(radio)
+            self.efi_group.add(row)
+
     def find_physical_disk_for_path(self, target_path, block_devices):
         """Traces a given path back to its parent physical disk using lsblk data, handling loop devices."""
         print(f"--- Tracing physical disk for path: {target_path} ---")
@@ -363,16 +557,17 @@ class DiskPage(BaseConfigurationPage):
         self.partitioning_method = None
         self.selected_disks = set()
         self.disk_widgets = {}
-        # Clear previous list items
-        while child := self.disk_list_box.get_row_at_index(0):
-             self.disk_list_box.remove(child)
-             
+        
+        # Clear previous UI state
         self.disk_list_group.set_visible(False)
-        self.disk_list_box.set_visible(False)
-        self.part_group.set_visible(False)
+        self.mode_group.set_visible(False)
+        self.fs_group.set_visible(False)
+        self.efi_group.set_visible(False)
         self.complete_button.set_sensitive(False)
-        self.auto_part_check.set_active(False)
-        self.manual_part_check.set_active(False)
+        
+        # Reset radio buttons
+        self.normal_radio.set_active(False)
+        self.dual_boot_radio.set_active(False)
 
         try:
             # Run lsblk ONCE, get JSON tree, include MOUNTPOINT
@@ -447,13 +642,15 @@ class DiskPage(BaseConfigurationPage):
                     self.detected_disks.append(disk_info)
 
             print(f"Detected disks list: {self.detected_disks}")
-            self.update_disk_list_ui()
+            self._populate_disk_list()
             self.scan_completed = True
             self.show_toast(f"Scan complete. Found {len(self.detected_disks)} disk(s).")
+            
             if self.detected_disks:
                 self.disk_list_group.set_visible(True)
-                self.disk_list_box.set_visible(True)
-                self.part_group.set_visible(True)
+                self.mode_group.set_visible(True)
+                self.fs_group.set_visible(True)
+                self.normal_radio.set_active(True)  # Default to normal install
             else:
                  self.show_toast("No suitable disks found for installation.")
 
@@ -478,199 +675,185 @@ class DiskPage(BaseConfigurationPage):
             button.set_sensitive(True)
             self.update_complete_button_state()
             
-    def update_disk_list_ui(self):
-        """Populates the disk list UI, marking the live OS disk as unusable."""
-        # Clear previous items
-        while child := self.disk_list_box.get_row_at_index(0):
-             self.disk_list_box.remove(child)
+    def _populate_disk_list(self):
+        """Populate the disk list with detected disks."""
+        # Clear existing rows
+        # In GTK 4, we need to remove rows differently
+        for widget in list(self.disk_list_group):
+            self.disk_list_group.remove(widget)
+        
         self.disk_widgets = {}
 
         if not self.detected_disks:
-            # Display a message if no disks found
-            row = Adw.ActionRow(title="No suitable disks found", subtitle="Cannot proceed with installation.")
+            row = Adw.ActionRow(
+                title="No suitable disks found", 
+                subtitle="Cannot proceed with installation."
+            )
             row.set_activatable(False)
-            self.disk_list_box.append(row)
+            self.disk_list_group.add(row)
             return
 
+        disk_radio_group = None
         found_usable_disk = False
-        for disk in self.detected_disks:
+        
+        for i, disk in enumerate(self.detected_disks):
             disk_path = disk["path"]
             disk_size_str = format_bytes(disk["size"])
-            title = f"{disk_path} - {disk['model']}"
+            title = f"{disk['model']} ({disk_path})"
             subtitle = f"Size: {disk_size_str}"
             
             row = Adw.ActionRow(title=title, subtitle=subtitle)
-            check = Gtk.CheckButton()
-            check.set_valign(Gtk.Align.CENTER)
             
             if disk["is_live_os_disk"]: 
                  print(f"!!! UI Update: Marking {disk['path']} (Live OS Disk) as insensitive.")
                  row.set_subtitle(subtitle + " (Live OS Disk - Cannot select)")
                  row.set_sensitive(False) 
-                 check.set_sensitive(False)
+                 warning_icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
+                 warning_icon.set_tooltip_text("This disk contains the live operating system")
+                 row.add_suffix(warning_icon)
             else:
                  found_usable_disk = True
-                 check.connect("toggled", self.on_disk_toggled, disk_path)
-                 row.add_suffix(check)
-                 row.set_activatable_widget(check)
+                 radio = Gtk.CheckButton() if i == 0 else Gtk.CheckButton(group=disk_radio_group)
+                 if i == 0:
+                     disk_radio_group = radio
+                     radio.set_active(True)  # Select first usable disk by default
+                     self.selected_disks.add(disk_path)
+                 
+                 radio.set_valign(Gtk.Align.CENTER)
+                 radio.connect("toggled", self.on_disk_toggled, disk_path)
+                 row.add_suffix(radio)
+                 row.set_activatable_widget(radio)
+                 self.disk_widgets[disk_path] = {"row": row, "radio": radio}
 
-            self.disk_list_box.append(row)
-            # Store widgets even if disabled, for completeness
-            self.disk_widgets[disk_path] = {"row": row, "check": check} 
+            self.disk_list_group.add(row)
             
         if not found_usable_disk:
-             # Optionally add a specific message if only host disks were found
              print("Warning: No usable disks detected (only Live OS disk found?).")
-             # Consider adding a visible label to the UI group
-             
-    def on_disk_toggled(self, check_button, disk_path):
-        print(f"--- Toggle event for {disk_path} ---")
-        # Check sensitivity (which depends on is_live_os_disk flag)
-        if disk_path in self.disk_widgets and self.disk_widgets[disk_path]["row"].get_sensitive():
-            if check_button.get_active():
-                print(f"  Adding {disk_path} to selected_disks.")
-                self.selected_disks.add(disk_path)
-            else:
-                print(f"  Removing {disk_path} from selected_disks.")
-                self.selected_disks.discard(disk_path)
-        else:
-             print(f"  ROW NOT SENSITIVE (likely Live OS disk). Forcing checkbox inactive for {disk_path}.")
-             if check_button.get_active(): # Prevent state change if already inactive
-                  GLib.idle_add(check_button.set_active, False)
 
+    def on_disk_toggled(self, radio_button, disk_path):
+        """Handle disk selection toggle."""
+        print(f"--- Toggle event for {disk_path} ---")
+        
+        if radio_button.get_active():
+            print(f"  Adding {disk_path} to selected_disks.")
+            self.selected_disks.clear()  # Only one disk at a time for now
+            self.selected_disks.add(disk_path)
+        
         self.update_complete_button_state()
 
-    def on_partitioning_method_toggled(self, button):
-         """Handle radio button selection for partitioning method."""
-         if self.auto_part_check.get_active():
-             print("Partitioning method: AUTOMATIC")
-             self.partitioning_method = "AUTOMATIC"
-         elif self.manual_part_check.get_active():
-             print("Partitioning method: MANUAL")
-             self.partitioning_method = "MANUAL"
-         else:
-             # Should not happen with radio buttons unless both are inactive initially
-             self.partitioning_method = None
-             
-         self.update_complete_button_state()
-
     def update_complete_button_state(self):
+        """Update the state of the complete button based on current selections."""
         print(f"--- Updating button state ---")
-        print(f"  Selected disks BEFORE validation: {self.selected_disks}")
-        # Validate against sensitivity (which reflects is_live_os_disk)
-        valid_selected_disks = {d for d in self.selected_disks if d in self.disk_widgets and self.disk_widgets[d]["row"].get_sensitive()}
-        if len(valid_selected_disks) != len(self.selected_disks):
-             print(f"  WARNING: Live OS disk found in selected_disks set. Correcting.")
-             self.selected_disks = valid_selected_disks 
-             
-        print(f"  Selected disks AFTER validation: {self.selected_disks}") 
+        print(f"  Selected disks: {self.selected_disks}")
+        print(f"  Partitioning method: {self.partitioning_method}")
         
         can_proceed = (
             self.scan_completed and 
             len(self.selected_disks) > 0 and 
-            self.partitioning_method is not None
+            self.partitioning_method is not None and
+            (not self.dual_boot_enabled or self.selected_efi_partition is not None)
         )
-        print(f"  Scan completed: {self.scan_completed}") # DEBUG
-        print(f"  Valid disks selected: {len(self.selected_disks) > 0}") # DEBUG
-        print(f"  Method selected: {self.partitioning_method is not None}") # DEBUG
-        print(f"  Setting Confirm button sensitive: {can_proceed}")
+        
+        print(f"  Setting Complete button sensitive: {can_proceed}")
         self.complete_button.set_sensitive(can_proceed)
         
     def apply_settings_and_return(self, button):
+        """Apply the storage configuration and return to summary."""
         print(f"--- Apply Settings START ---")
-        print(f"  Selected disks at start: {self.selected_disks}")
+        print(f"  Selected disks: {self.selected_disks}")
+        print(f"  Installation mode: {self.partitioning_method}")
+        print(f"  Filesystem: {self.filesystem_type}")
+        print(f"  Dual boot: {self.dual_boot_enabled}")
+        print(f"  Preserve EFI: {self.preserve_efi}")
         
         # Re-validate conditions before proceeding
         self.update_complete_button_state()
         if not self.complete_button.get_sensitive():
-             # This provides more specific feedback than just not proceeding
-             if not self.scan_completed:
-                 self.show_toast("Please scan for disks first.")
-             elif len(self.selected_disks) == 0:
-                 self.show_toast("Please select at least one usable disk.")
-             elif self.partitioning_method is None:
-                 self.show_toast("Please select a partitioning method.")
-             else:
-                 self.show_toast("Cannot confirm storage plan. Please check selections.") # Generic fallback
+             self.show_toast("Please complete all required selections.")
              return
 
-        print(f"--- Confirming Storage Plan ---")
-        print(f"  Selected Disks before generating commands: {list(self.selected_disks)}")
-        print(f"  Partitioning Method: {self.partitioning_method}")
+        if not self.selected_disks:
+             self.show_toast("Please select a disk for installation.")
+             return
+
+        primary_disk = sorted(list(self.selected_disks))[0]
         
         # Initialize config_values
         config_values = {
             "method": self.partitioning_method,
             "target_disks": sorted(list(self.selected_disks)), 
+            "filesystem": self.filesystem_type,
+            "dual_boot": self.dual_boot_enabled,
+            "preserve_efi": self.preserve_efi,
+            "selected_efi_partition": self.selected_efi_partition,
+            "custom_format": self.custom_format_enabled,
             "commands": [],
             "partitions": []
         }
 
-        if self.partitioning_method == "AUTOMATIC":
-            # Check again just before using
-            if not self.selected_disks:
-                 print("!!! ERROR: No disks selected in apply_settings_and_return despite button being sensitive!")
-                 self.show_toast("Internal Error: No disk selected.")
-                 return
-            primary_disk = sorted(list(self.selected_disks))[0]
-            # Check if primary_disk is sensitive (should be)
-            if primary_disk not in self.disk_widgets or not self.disk_widgets[primary_disk]["row"].get_sensitive():
-                 print(f"!!! ERROR: Primary disk {primary_disk} is marked as unusable but was selected!")
-                 self.show_toast(f"Internal Error: Cannot use disk {primary_disk}.")
-                 return 
-                 
-            print(f"  Generating AUTOMATIC partitioning commands for: {primary_disk}")
+        if self.partitioning_method in ["normal", "dual_boot"]:
+            print(f"  Generating partitioning commands for: {primary_disk}")
+            
+            # Get EFI size if custom formatting is enabled
+            efi_size = int(self.efi_size_row.get_value()) if self.custom_format_enabled else 512
             
             # Generate the command lists
             partition_prefix = "p" if "nvme" in primary_disk else ""
-            wipe_cmd = generate_wipefs_command(primary_disk)
-            parted_cmds = generate_gpt_commands(primary_disk)
-            mkfs_cmds = generate_mkfs_commands(primary_disk, partition_prefix)
-            all_commands = [wipe_cmd] + parted_cmds + mkfs_cmds
-            config_values["commands"] = all_commands 
+            
+            if not (self.dual_boot_enabled and self.preserve_efi):
+                wipe_cmd = generate_wipefs_command(primary_disk)
+                config_values["commands"].append(wipe_cmd)
+            
+            parted_cmds = generate_gpt_commands(
+                primary_disk, 
+                efi_size_mb=efi_size,
+                filesystem=self.filesystem_type,
+                dual_boot=self.dual_boot_enabled,
+                preserve_efi=self.preserve_efi
+            )
+            config_values["commands"].extend(parted_cmds)
+            
+            mkfs_cmds = generate_mkfs_commands(
+                primary_disk,
+                filesystem=self.filesystem_type,
+                partition_prefix=partition_prefix,
+                dual_boot=self.dual_boot_enabled,
+                preserve_efi=self.preserve_efi
+            )
+            config_values["commands"].extend(mkfs_cmds)
+            
+            # Define partition layout
             part1_suffix = f"{partition_prefix}1"
             part2_suffix = f"{partition_prefix}2"
-            config_values["partitions"] = [
-                {"device": f"{primary_disk}{part1_suffix}", "mountpoint": "/boot/efi", "fstype": "vfat"},
-                {"device": f"{primary_disk}{part2_suffix}", "mountpoint": "/", "fstype": "ext4"}
-            ]
-            if all_commands:
-                 print(f"    Example command: {' '.join(shlex.quote(c) for c in all_commands[0])}")
-                 
-        elif self.partitioning_method == "MANUAL":
-            print("  Manual Plan: (Not implemented - no commands generated)")
-            # We should ideally detect existing partitions here if MANual was implemented
-
-        # Show confirmation toast - COMMENTED OUT
-        # if self.partitioning_method == \"AUTOMATIC\":
-        #     self.show_toast(f\"Storage plan confirmed (Automatic). Commands generated.\")
-        # elif self.partitioning_method == \"MANUAL\":
-        #      if config_values[\"partitions\"]:
-        #           self.show_toast(f\"Storage plan confirmed (Manual). Found partitions to use.\")
-        #      else:
-        #           # Should have returned earlier if no partitions found
-        #           self.show_toast(\"Storage plan confirmed (Manual), but partition detection failed.\")
-        # else:
-        #      # Fallback for potentially other methods if added later
-        #      self.show_toast(f\"Storage plan confirmed ({self.partitioning_method}).\")
             
-        print("Storage plan confirmed. Returning to summary.") # Keep terminal log
-        super().mark_complete_and_return(button, config_values=config_values)
+            partitions = []
+            if not (self.dual_boot_enabled and self.preserve_efi):
+                partitions.append({
+                    "device": f"{primary_disk}{part1_suffix}", 
+                    "mountpoint": "/boot/efi", 
+                    "fstype": "vfat"
+                })
+            elif self.selected_efi_partition:
+                partitions.append({
+                    "device": self.selected_efi_partition,
+                    "mountpoint": "/boot/efi",
+                    "fstype": "vfat"
+                })
+            
+            partitions.append({
+                "device": f"{primary_disk}{part2_suffix}", 
+                "mountpoint": "/", 
+                "fstype": self.filesystem_type
+            })
+            
+            config_values["partitions"] = partitions
+            
+            if config_values["commands"]:
+                 print(f"    Example command: {' '.join(shlex.quote(c) for c in config_values['commands'][0])}")
+
+        print("Storage configuration confirmed. Returning to summary.")
         
-        # --- REMOVED REDUNDANT TODO/SIMULATION CODE --- 
-
-        if self.partitioning_method == "AUTOMATIC":
-            self.show_toast(f"Automatic partitioning on {', '.join(sorted(list(self.selected_disks)))} requested." )
-            # Simulate success for now
-            config_values = {
-                "selected_disks": sorted(list(self.selected_disks)),
-                "partitioning_method": self.partitioning_method,
-                # Add other relevant details like mount points later
-            }
-            super().mark_complete_and_return(button, config_values=config_values)
-            
-        elif self.partitioning_method == "MANUAL":
-            self.show_toast("Manual partitioning is not yet implemented.")
-            # Do not mark complete if the selected method isn't implemented
-        else:
-             self.show_toast("Unknown partitioning method selected.") 
+        mode_text = "Dual boot" if self.dual_boot_enabled else "Clean installation"
+        self.show_toast(f"{mode_text} on {primary_disk} with {self.filesystem_type} filesystem")
+        
+        super().mark_complete_and_return(button, config_values=config_values) 

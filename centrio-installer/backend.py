@@ -4,7 +4,7 @@ import subprocess
 import shlex
 import os
 import re # For parsing os-release
-from .utils import get_os_release_info
+from utils import get_os_release_info
 import errno # For checking mount errors
 import time   # For delays
 import shutil # For copying bootloader files
@@ -440,41 +440,163 @@ def create_user_in_container(target_root, user_config, progress_callback=None):
 
 # --- Package Installation ---
 
-def install_packages_dnf(target_root, progress_callback=None):
-    """Installs base packages using DNF --installroot, parsing output for progress.
+def setup_repositories(target_root, repositories, progress_callback=None):
+    """Setup additional repositories in the target system."""
+    if not repositories:
+        print("No additional repositories to setup.")
+        return True, ""
     
-    Note: This function bypasses _run_command and assumes it is run with root privileges.
-    It directly calls subprocess.Popen for DNF.
+    print(f"Setting up {len(repositories)} additional repositories...")
+    errors = []
+    
+    for repo in repositories:
+        repo_id = repo.get("id", "unknown")
+        repo_name = repo.get("name", repo_id)
+        repo_url = repo.get("url", "")
+        
+        if not repo_url:
+            err_msg = f"Repository {repo_id} has no URL configured"
+            print(f"Warning: {err_msg}")
+            errors.append(err_msg)
+            continue
+        
+        print(f"Setting up repository: {repo_name} ({repo_id})")
+        if progress_callback:
+            progress_callback(f"Setting up repository: {repo_name}...", None)
+        
+        # Handle different repository types
+        if repo_id == "flathub":
+            # Flathub is handled by Flatpak setup, skip here
+            continue
+        elif repo_url.endswith(".repo"):
+            # DNF repository file
+            repo_cmd = ["dnf", "config-manager", "--add-repo", repo_url, f"--installroot={target_root}"]
+        elif repo_url.endswith(".rpm"):
+            # RPM package containing repository configuration
+            repo_cmd = ["dnf", "install", "-y", repo_url, f"--installroot={target_root}"]
+        else:
+            # Generic repository URL - create repo file manually
+            repo_file_path = os.path.join(target_root, f"etc/yum.repos.d/{repo_id}.repo")
+            try:
+                os.makedirs(os.path.dirname(repo_file_path), exist_ok=True)
+                with open(repo_file_path, 'w') as f:
+                    f.write(f"""[{repo_id}]
+name={repo_name}
+baseurl={repo_url}
+enabled=1
+gpgcheck=0
+""")
+                print(f"Created repository file: {repo_file_path}")
+                continue
+            except Exception as e:
+                err_msg = f"Failed to create repository file for {repo_id}: {e}"
+                print(f"ERROR: {err_msg}")
+                errors.append(err_msg)
+                continue
+        
+        # Execute repository setup command
+        success, err, _ = _run_command(repo_cmd, f"Setup repository {repo_name}", progress_callback, timeout=120)
+        if not success:
+            err_msg = f"Failed to setup repository {repo_name}: {err}"
+            print(f"ERROR: {err_msg}")
+            errors.append(err_msg)
+        else:
+            print(f"Successfully setup repository: {repo_name}")
+    
+    final_error = "\n".join(errors) if errors else ""
+    return len(errors) == 0, final_error
+
+def install_packages_enhanced(target_root, package_config, progress_callback=None):
+    """Enhanced package installation with custom repositories and package selection.
+    
+    package_config should contain:
+    - packages: list of package names to install
+    - repositories: list of additional repositories to setup
+    - flatpak_enabled: whether to install and setup Flatpak
+    - minimal_install: whether to perform minimal installation
     """
     
     # --- Root Check --- 
     if os.geteuid() != 0:
-        err = "install_packages_dnf must be run as root."
+        err = "install_packages_enhanced must be run as root."
         print(f"ERROR: {err}")
         return False, err
+    
+    print("Starting enhanced package installation...")
+    
+    # Get configuration
+    packages = package_config.get("packages", [])
+    repositories = package_config.get("repositories", [])
+    flatpak_enabled = package_config.get("flatpak_enabled", False)
+    minimal_install = package_config.get("minimal_install", False)
+    keep_cache = package_config.get("keep_cache", True)
+    
+    print(f"Packages to install: {len(packages)}")
+    print(f"Additional repositories: {len(repositories)}")
+    print(f"Flatpak enabled: {flatpak_enabled}")
+    print(f"Minimal installation: {minimal_install}")
+    
+    # --- Setup Additional Repositories First ---
+    if repositories:
+        if progress_callback:
+            progress_callback("Setting up additional repositories...", 0.1)
+        success, err = setup_repositories(target_root, repositories, progress_callback)
+        if not success:
+            print(f"Warning: Some repositories failed to setup: {err}")
+            # Continue anyway, as base installation might still work
+    
+    # --- Install Packages ---
+    if progress_callback:
+        progress_callback("Installing packages...", 0.2)
+    
+    if minimal_install:
+        # For minimal install, use only core packages
+        packages = ["@core", "kernel", "grub2-efi-x64", "grub2-pc", "NetworkManager"]
+        print("Minimal installation: using core packages only")
+    elif not packages:
+        # Use default package list if none specified
+        packages = [
+            "@core", "kernel", 
+            "grub2-efi-x64", "grub2-efi-x64-modules", "grub2-pc", "efibootmgr", 
+            "grub2-common", "grub2-tools",
+            "shim-x64", "shim",
+            "linux-firmware", "NetworkManager", "systemd-resolved", 
+            "bash-completion", "dnf-utils"
+        ]
+        print("Using default package list")
+    
+    success, err = _install_packages_dnf_impl(target_root, packages, progress_callback, keep_cache)
+    if not success:
+        return False, err
+    
+    # --- Setup Flatpak if enabled ---
+    if flatpak_enabled:
+        if progress_callback:
+            progress_callback("Setting up Flatpak...", 0.9)
+        
+        success, err = setup_flatpak(target_root, progress_callback)
+        if not success:
+            print(f"Warning: Flatpak setup failed: {err}")
+            # Don't fail the entire installation for Flatpak issues
+    
+    if progress_callback:
+        progress_callback("Package installation complete.", 1.0)
+    
+    print("Enhanced package installation completed successfully.")
+    return True, ""
 
+def _install_packages_dnf_impl(target_root, packages, progress_callback=None, keep_cache=True):
+    """Implementation of DNF package installation with progress tracking."""
+    
     # --- Get Release Version --- 
     os_info = get_os_release_info()
     releasever = os_info.get("VERSION_ID")
     if not releasever:
         print("Warning: Could not detect OS VERSION_ID. Falling back to default.")
-        # Attempt to get from target_root if possible? Requires parsing /etc/os-release
-        # For now, stick to fallback or error
-        # return False, "Could not determine release version for DNF." # Option: fail hard
         releasever = "40" # Default fallback
     print(f"Using release version: {releasever}")
     
-    # --- Define Packages and Command --- 
-    packages = [
-        "@core", "kernel", 
-        "grub2-efi-x64", "grub2-efi-x64-modules", "grub2-pc", "efibootmgr", 
-        "grub2-common", "grub2-tools", # Add common/tools packages
-        "shim-x64", "shim", # Removed shim-x86_64
-        "linux-firmware", "NetworkManager", "systemd-resolved", 
-        "bash-completion", "dnf-utils"
-        # Add more packages as needed
-    ]
-    
+    # Build DNF command
     dnf_cmd = [
         "dnf", 
         "install", 
@@ -483,11 +605,16 @@ def install_packages_dnf(target_root, progress_callback=None):
         f"--installroot={target_root}",
         f"--releasever={releasever}",
         f"--setopt=install_weak_deps=False"
-    ] + packages
+    ]
+    
+    if not keep_cache:
+        dnf_cmd.append("--setopt=keepcache=0")
+    
+    dnf_cmd.extend(packages)
 
-    print(f"Executing Backend Step (directly as root): Install Base Packages (DNF) -> {' '.join(shlex.quote(c) for c in dnf_cmd)}")
+    print(f"Executing DNF installation: {' '.join(shlex.quote(c) for c in dnf_cmd[:10])}... ({len(packages)} packages)")
     if progress_callback:
-        progress_callback("Starting DNF package installation (This may take a while...)", 0.0) # Initial message
+        progress_callback("Starting DNF package installation...", 0.0)
         
     # --- Execute DNF and Stream Output --- 
     process = None
@@ -498,16 +625,13 @@ def install_packages_dnf(target_root, progress_callback=None):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            bufsize=1 # Line-buffered
+            bufsize=1
         )
 
-        # Regex patterns for progress parsing
-        # Example: Downloading Packages: [ 15%] |           | 112 kB/s | 761 kB | 00m06s ETA
+        # Progress tracking patterns
         download_progress_re = re.compile(r"^Downloading Packages:.*?\[\s*(\d+)%\]")
-        # Example: Installing        : kernel-core-6.9.5-200.fc40.x86_64        163/170 
         install_progress_re = re.compile(r"^(Installing|Updating|Upgrading|Cleanup|Verifying)\s*:.*?\s+(\d+)/(\d+)\s*$")
-        # Corrected regex: removed extra backslash before d+
-        total_packages_re = re.compile(r"Total download size:.*Installed size:.* Package count: (\d+)") # May not always appear
+        total_packages_re = re.compile(r"Total download size:.*Installed size:.* Package count: (\d+)")
 
         total_packages = 0
         packages_processed = 0
@@ -515,142 +639,213 @@ def install_packages_dnf(target_root, progress_callback=None):
         last_fraction = 0.0
         
         # Read stdout line by line
-        for line in iter(process.stdout.readline, ''):
-            line_strip = line.strip()
-            if not line_strip: continue
-            # print(f"DNF_RAW: {line_strip}") # Debug: print raw DNF output
-            
-            # --- Phase Detection (simple) --- 
-            if "Downloading Packages" in line_strip: current_phase = "Downloading"
-            elif "Running transaction check" in line_strip: current_phase = "Checking Transaction"
-            elif "Running transaction test" in line_strip: current_phase = "Testing Transaction"
-            elif "Running transaction" in line_strip: current_phase = "Running Transaction"
-            elif line_strip.startswith("Installing") or line_strip.startswith("Updating"): current_phase = "Installing"
-            elif line_strip.startswith("Running scriptlet"): current_phase = "Running Scriptlets"
-            elif line_strip.startswith("Verifying"): current_phase = "Verifying"
-            elif line_strip.startswith("Installed:"): current_phase = "Finalizing Installation"
-            elif line_strip.startswith("Complete!"): current_phase = "Complete"
-
-            # --- Progress Parsing --- 
-            fraction = last_fraction # Default to last known fraction
-            message = f"DNF: {current_phase}..."
-            
-            # Total Package Count (Best effort)
-            match_total = total_packages_re.search(line_strip)
-            if match_total:
-                 total_packages = int(match_total.group(1))
-                 print(f"Detected total package count: {total_packages}")
-
-            # Download Progress
-            match_dl = download_progress_re.search(line_strip)
-            if match_dl:
-                 download_percent = int(match_dl.group(1))
-                 # Estimate overall progress: Assume download is first 30%?
-                 fraction = 0.0 + (download_percent / 100.0) * 0.30
-                 message = f"DNF: Downloading ({download_percent}%)..."
-                 
-            # Installation/Verification Progress
-            match_install = install_progress_re.search(line_strip)
-            if match_install:
-                current_phase = match_install.group(1) # More specific phase
-                packages_processed = int(match_install.group(2))
-                total_packages_from_line = int(match_install.group(3))
-                # Use total from line if greater than previously detected (more reliable)
-                if total_packages_from_line > total_packages:
-                    total_packages = total_packages_from_line
+        if process.stdout is not None:
+            for line in iter(process.stdout.readline, ''):
+                line_strip = line.strip()
+                if not line_strip:
+                    continue
                 
-                if total_packages > 0:
-                    # Estimate overall progress: Assume install/verify is 30% to 95%?
-                    phase_progress = packages_processed / total_packages
-                    if current_phase == "Installing" or current_phase == "Updating" or current_phase == "Upgrading":
-                       fraction = 0.30 + phase_progress * 0.60 # Installation: 30% -> 90%
-                    elif current_phase == "Verifying":
-                       fraction = 0.90 + phase_progress * 0.05 # Verification: 90% -> 95%
-                    elif current_phase == "Cleanup":
-                       fraction = 0.95 + phase_progress * 0.05 # Cleanup: 95% -> 100%
-                    message = f"DNF: {current_phase} ({packages_processed}/{total_packages})..."
-                else:
-                     message = f"DNF: {current_phase} (package {packages_processed})..."
-                     fraction = 0.30 # Fallback if total not found yet
+                # Phase detection
+                if "Downloading Packages" in line_strip:
+                    current_phase = "Downloading"
+                elif "Running transaction check" in line_strip:
+                    current_phase = "Checking Transaction"
+                elif "Running transaction test" in line_strip:
+                    current_phase = "Testing Transaction"
+                elif "Running transaction" in line_strip:
+                    current_phase = "Running Transaction"
+                elif line_strip.startswith("Installing") or line_strip.startswith("Updating"):
+                    current_phase = "Installing"
+                elif line_strip.startswith("Running scriptlet"):
+                    current_phase = "Running Scriptlets"
+                elif line_strip.startswith("Verifying"):
+                    current_phase = "Verifying"
+                elif line_strip.startswith("Installed:"):
+                    current_phase = "Finalizing Installation"
+                elif line_strip.startswith("Complete!"):
+                    current_phase = "Complete"
 
-            # Clamp fraction between 0.0 and 0.99 during processing
-            fraction = max(0.0, min(fraction, 0.99))
-            last_fraction = fraction
-            
-            if progress_callback:
-                progress_callback(message, fraction)
+                # Progress parsing
+                fraction = last_fraction
+                message = f"DNF: {current_phase}..."
+                
+                # Total package count
+                match_total = total_packages_re.search(line_strip)
+                if match_total:
+                    total_packages = int(match_total.group(1))
+                    print(f"Detected total package count: {total_packages}")
 
-            # Check if process exited prematurely
-            if process.poll() is not None:
-                print("Warning: DNF process exited while reading stdout.")
-                break
+                # Download progress
+                match_dl = download_progress_re.search(line_strip)
+                if match_dl:
+                    download_percent = int(match_dl.group(1))
+                    fraction = 0.0 + (download_percent / 100.0) * 0.30
+                    message = f"DNF: Downloading ({download_percent}%)..."
+                     
+                # Installation progress
+                match_install = install_progress_re.search(line_strip)
+                if match_install:
+                    current_phase = match_install.group(1)
+                    packages_processed = int(match_install.group(2))
+                    total_packages_from_line = int(match_install.group(3))
+                    
+                    if total_packages_from_line > total_packages:
+                        total_packages = total_packages_from_line
+                    
+                    if total_packages > 0:
+                        phase_progress = packages_processed / total_packages
+                        if current_phase in ["Installing", "Updating", "Upgrading"]:
+                            fraction = 0.30 + phase_progress * 0.60
+                        elif current_phase == "Verifying":
+                            fraction = 0.90 + phase_progress * 0.05
+                        elif current_phase == "Cleanup":
+                            fraction = 0.95 + phase_progress * 0.05
+                        message = f"DNF: {current_phase} ({packages_processed}/{total_packages})..."
+                    else:
+                        message = f"DNF: {current_phase} (package {packages_processed})..."
+                        fraction = 0.30
+
+                # Clamp fraction
+                fraction = max(0.0, min(fraction, 0.99))
+                last_fraction = fraction
+                
+                if progress_callback:
+                    progress_callback(message, fraction)
+
+                # Check if process exited
+                if process.poll() is not None:
+                    print("DNF process completed while reading output.")
+                    break
+        else:
+            raise RuntimeError("process.stdout is None; cannot read DNF output")
+                
+        # Wait for process completion
+        process.stdout.close()
+        return_code = process.wait(timeout=60)
         
-        # --- Wait and Check Result --- 
-        process.stdout.close() # Close stdout pipe
-        return_code = process.wait(timeout=60) # Wait briefly for final exit
-        stderr_output = process.stderr.read() # Read all stderr at the end
-        process.stderr.close()
+        # Read stderr
+        if process.stderr:
+            stderr_output = process.stderr.read()
+            process.stderr.close()
         
         if return_code != 0:
-            error_msg = f"DNF installation failed (rc={return_code}). Stderr:\n{stderr_output.strip()}"
+            stderr_text = stderr_output.strip() if stderr_output else ""
+            error_msg = f"DNF installation failed (rc={return_code}). Stderr:\n{stderr_text}"
             print(f"ERROR: {error_msg}")
-            if progress_callback: progress_callback(error_msg, last_fraction)
-            
-            # --- Add dmesg logging on error --- 
-            print("--- Attempting to get last kernel messages (dmesg) ---")
-            try:
-                 # Run dmesg directly, not via _run_command to avoid loops/pkexec issues
-                 dmesg_cmd = ["dmesg"] # Request last few lines might be better
-                 dmesg_process = subprocess.run(dmesg_cmd, capture_output=True, text=True, check=False, timeout=5)
-                 if dmesg_process.stdout:
-                      last_lines = "\n".join(dmesg_process.stdout.strip().split('\n')[-20:]) # Get last 20 lines
-                      print(f"Last ~20 lines of dmesg:\n{last_lines}")
-                 else:
-                      print("Could not capture dmesg output.")
-                 if dmesg_process.stderr:
-                      print(f"dmesg stderr: {dmesg_process.stderr.strip()}")
-            except Exception as dmesg_e:
-                 print(f"Failed to run or capture dmesg: {dmesg_e}")
-            print("-----------------------------------------------------")
-            # --- End dmesg logging --- 
-            
+            if progress_callback:
+                progress_callback(error_msg, last_fraction)
             return False, error_msg
         else:
-             print(f"SUCCESS: DNF installation completed.")
-             # --- Run sync after successful DNF --- 
-             print("Running sync after DNF installation...")
-             try:
-                 subprocess.run(["sync"], check=False, timeout=15)
-                 print("Sync complete.")
-             except Exception as sync_e:
-                 print(f"Warning: Sync after DNF failed: {sync_e}")
-             # --- End sync ---
-             if progress_callback: progress_callback("DNF installation complete.", 1.0)
-             # Optionally enable NetworkManager here (but requires _run_in_chroot, which uses _run_command)
-             return True, ""
+            print("SUCCESS: DNF installation completed.")
+            # Sync after installation
+            try:
+                subprocess.run(["sync"], check=False, timeout=15)
+                print("Sync complete.")
+            except Exception as sync_e:
+                print(f"Warning: Sync after DNF failed: {sync_e}")
+            
+            if progress_callback:
+                progress_callback("DNF installation complete.", 1.0)
+            return True, ""
             
     except FileNotFoundError:
         err = "Command not found: dnf. Cannot install packages."
         print(f"ERROR: {err}")
-        if progress_callback: progress_callback(err, 0.0)
+        if progress_callback:
+            progress_callback(err, 0.0)
         return False, err
     except subprocess.TimeoutExpired:
         err = "Timeout expired during DNF execution."
         print(f"ERROR: {err}")
-        if process: process.kill()
-        if progress_callback: progress_callback(err, last_fraction)
+        if process:
+            process.kill()
+        if progress_callback:
+            progress_callback(err, last_fraction)
         return False, err
     except Exception as e:
-        err = f"Unexpected error during DNF execution: {e}\nStderr so far: {stderr_output}"
+        err = f"Unexpected error during DNF execution: {e}\nStderr: {stderr_output}"
         print(f"ERROR: {err}")
-        if process: process.kill()
-        if progress_callback: progress_callback(err, last_fraction)
+        if process:
+            process.kill()
+        if progress_callback:
+            progress_callback(err, last_fraction)
         return False, err
     finally:
-         # Ensure streams are closed if process was started
-         if process:
-             if process.stdout and not process.stdout.closed: process.stdout.close()
-             if process.stderr and not process.stderr.closed: process.stderr.close()
+        if process:
+            if process.stdout and not process.stdout.closed:
+                process.stdout.close()
+            if process.stderr and not process.stderr.closed:
+                process.stderr.close()
+
+def setup_flatpak(target_root, progress_callback=None):
+    """Setup Flatpak and add Flathub repository in the target system."""
+    print("Setting up Flatpak...")
+    
+    if progress_callback:
+        progress_callback("Installing Flatpak...", 0.0)
+    
+    # Install Flatpak packages (should already be installed by package selection)
+    flatpak_packages = ["flatpak", "xdg-desktop-portal", "xdg-desktop-portal-gtk"]
+    
+    # Ensure Flatpak is installed
+    for package in flatpak_packages:
+        check_cmd = ["rpm", "-q", package, f"--root={target_root}"]
+        result = subprocess.run(check_cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            print(f"Package {package} not found, installing...")
+            install_cmd = ["dnf", "install", "-y", package, f"--installroot={target_root}"]
+            success, err, _ = _run_command(install_cmd, f"Install {package}", progress_callback, timeout=300)
+            if not success:
+                return False, f"Failed to install {package}: {err}"
+    
+    if progress_callback:
+        progress_callback("Adding Flathub repository...", 0.5)
+    
+    # Add Flathub repository
+    flathub_cmd = [
+        "flatpak", "remote-add", "--if-not-exists", "flathub", 
+        "https://flathub.org/repo/flathub.flatpakrepo"
+    ]
+    
+    success, err, _ = _run_in_chroot(target_root, flathub_cmd, "Add Flathub repository", progress_callback, timeout=60)
+    if not success:
+        return False, f"Failed to add Flathub repository: {err}"
+    
+    # Enable Flatpak user installations
+    if progress_callback:
+        progress_callback("Configuring Flatpak...", 0.8)
+    
+    # Create systemd user service directory
+    systemd_user_dir = os.path.join(target_root, "etc/systemd/user/default.target.wants")
+    try:
+        os.makedirs(systemd_user_dir, exist_ok=True)
+    except Exception as e:
+        print(f"Warning: Failed to create systemd user directory: {e}")
+    
+    print("Flatpak setup completed successfully.")
+    return True, ""
+
+# Keep the original function for backward compatibility
+def install_packages_dnf(target_root, progress_callback=None):
+    """Legacy function - installs base packages using DNF --installroot."""
+    
+    # Use default package configuration
+    package_config = {
+        "packages": [
+            "@core", "kernel", 
+            "grub2-efi-x64", "grub2-efi-x64-modules", "grub2-pc", "efibootmgr", 
+            "grub2-common", "grub2-tools",
+            "shim-x64", "shim",
+            "linux-firmware", "NetworkManager", "systemd-resolved", 
+            "bash-completion", "dnf-utils"
+        ],
+        "repositories": [],
+        "flatpak_enabled": False,
+        "minimal_install": False,
+        "keep_cache": True
+    }
+    
+    return install_packages_enhanced(target_root, package_config, progress_callback)
 
 # --- Move NetworkManager Enable --- 
 # We need a function that uses _run_in_chroot (and thus _run_command for root check)
