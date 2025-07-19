@@ -621,7 +621,7 @@ def _install_packages_dnf_impl(target_root, packages, progress_callback=None, ke
         releasever = "40" # Default fallback
     print(f"Using release version: {releasever}")
     
-    # Build DNF command
+    # Build DNF command with package exclusions
     dnf_cmd = [
         "dnf", 
         "install", 
@@ -629,7 +629,14 @@ def _install_packages_dnf_impl(target_root, packages, progress_callback=None, ke
         "--nogpgcheck", 
         f"--installroot={target_root}",
         f"--releasever={releasever}",
-        f"--setopt=install_weak_deps=False"
+        f"--setopt=install_weak_deps=False",
+        "--exclude=firefox",
+        "--exclude=redhat-flatpak-repo", 
+        "--exclude=almalinux-*",
+        "--exclude=steam",
+        "--exclude=lutris",
+        "--exclude=wine",
+        "--exclude=libreoffice*"
     ]
     
     if not keep_cache:
