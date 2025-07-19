@@ -796,9 +796,19 @@ class DiskPage(BaseConfigurationPage):
             # Generate the command lists
             partition_prefix = "p" if "nvme" in primary_disk else ""
             
+            print(f"=== DISK CONFIGURATION DEBUG ===")
+            print(f"Primary disk: {primary_disk}")
+            print(f"Partition prefix: '{partition_prefix}'")
+            print(f"EFI size: {efi_size} MB")
+            print(f"Filesystem: {self.filesystem_type}")
+            print(f"Dual boot: {self.dual_boot_enabled}")
+            print(f"Preserve EFI: {self.preserve_efi}")
+            print(f"=== GENERATING COMMANDS ===")
+            
             if not (self.dual_boot_enabled and self.preserve_efi):
                 wipe_cmd = generate_wipefs_command(primary_disk)
                 config_values["commands"].append(wipe_cmd)
+                print(f"Wipe command: {wipe_cmd}")
             
             parted_cmds = generate_gpt_commands(
                 primary_disk, 
@@ -808,6 +818,7 @@ class DiskPage(BaseConfigurationPage):
                 preserve_efi=self.preserve_efi
             )
             config_values["commands"].extend(parted_cmds)
+            print(f"Parted commands: {parted_cmds}")
             
             mkfs_cmds = generate_mkfs_commands(
                 primary_disk,
@@ -817,32 +828,47 @@ class DiskPage(BaseConfigurationPage):
                 preserve_efi=self.preserve_efi
             )
             config_values["commands"].extend(mkfs_cmds)
+            print(f"Mkfs commands: {mkfs_cmds}")
             
             # Define partition layout
             part1_suffix = f"{partition_prefix}1"
             part2_suffix = f"{partition_prefix}2"
             
+            print(f"=== PARTITION LAYOUT ===")
+            print(f"Part1 suffix: '{part1_suffix}'")
+            print(f"Part2 suffix: '{part2_suffix}'")
+            
             partitions = []
             if not (self.dual_boot_enabled and self.preserve_efi):
+                efi_device = f"{primary_disk}{part1_suffix}"
                 partitions.append({
-                    "device": f"{primary_disk}{part1_suffix}", 
+                    "device": efi_device, 
                     "mountpoint": "/boot/efi", 
                     "fstype": "vfat"
                 })
+                print(f"EFI partition: device={efi_device}, mountpoint=/boot/efi, fstype=vfat")
             elif self.selected_efi_partition:
                 partitions.append({
                     "device": self.selected_efi_partition,
                     "mountpoint": "/boot/efi",
                     "fstype": "vfat"
                 })
+                print(f"Using existing EFI partition: device={self.selected_efi_partition}")
             
+            root_device = f"{primary_disk}{part2_suffix}"
             partitions.append({
-                "device": f"{primary_disk}{part2_suffix}", 
+                "device": root_device, 
                 "mountpoint": "/", 
                 "fstype": self.filesystem_type
             })
+            print(f"Root partition: device={root_device}, mountpoint=/, fstype={self.filesystem_type}")
             
             config_values["partitions"] = partitions
+            
+            print(f"=== FINAL COMMANDS LIST ===")
+            for i, cmd in enumerate(config_values["commands"]):
+                print(f"Command {i+1}: {' '.join(cmd)}")
+            print(f"=== END DISK CONFIGURATION DEBUG ===")
             
             if config_values["commands"]:
                  print(f"    Example command: {' '.join(shlex.quote(c) for c in config_values['commands'][0])}")

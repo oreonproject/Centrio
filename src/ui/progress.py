@@ -458,6 +458,15 @@ class ProgressPage(Gtk.Box):
             return False
             
         self._update_progress_text("Mounting filesystems...", 0.3)
+        
+        # Debug: Show what partitions we're trying to mount
+        print("=== PARTITION MOUNT DEBUG ===")
+        print(f"Target root: {self.target_root}")
+        print(f"Partitions to mount: {len(partitions)}")
+        for i, part in enumerate(partitions):
+            print(f"  Partition {i+1}: device={part.get('device')}, mountpoint={part.get('mountpoint')}, fstype={part.get('fstype')}")
+        print("=== END PARTITION MOUNT DEBUG ===")
+        
         try:
             os.makedirs(self.target_root, exist_ok=True)
         except OSError as e:
