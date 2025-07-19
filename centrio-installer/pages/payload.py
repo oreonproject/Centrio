@@ -19,14 +19,14 @@ DEFAULT_PACKAGE_GROUPS = {
     "desktop": {
         "name": "Desktop Environment",
         "description": "GNOME desktop environment and basic applications",
-        "packages": ["@gnome-desktop", "@base-x", "gnome-shell", "gdm", "gnome-terminal"],
+        "packages": ["@gnome-desktop", "@core", "gnome-shell", "gdm", "gnome-terminal", "oreon-release", "oreon-logos", "gnome-shell-extension-*-oreon"],
         "required": False,
         "selected": True
     },
     "multimedia": {
         "name": "Multimedia Support",
         "description": "Audio, video, and graphics support",
-        "packages": ["pulseaudio", "gstreamer1-plugins-good", "gstreamer1-plugins-bad-free", "mesa-dri-drivers"],
+        "packages": ["@multimedia"],
         "required": False,
         "selected": True
     },
