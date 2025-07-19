@@ -19,6 +19,10 @@ class BaseConfigurationPage(Adw.PreferencesPage):
         # Optional subtitle if provided
         if subtitle:
             self.set_description(subtitle)
+            
+        # Fix scrolling conflicts with main window
+        self.set_vexpand(False)
+        self.set_hexpand(True)
 
     def show_toast(self, message, timeout=3):
         """Show a toast notification if overlay is available."""

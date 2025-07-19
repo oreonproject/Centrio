@@ -48,9 +48,10 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
 
         # --- Scrolled Window for content --- 
         scrolled_window = Gtk.ScrolledWindow()
-        scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scrolled_window.set_vexpand(True)
         scrolled_window.set_hexpand(True)
+        scrolled_window.set_propagate_natural_height(True)
         self.toast_overlay.set_child(scrolled_window)
 
         # --- View Stack (inside the scrolled window) --- 

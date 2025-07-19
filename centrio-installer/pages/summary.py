@@ -11,6 +11,10 @@ class SummaryPage(Adw.PreferencesPage):
         super().__init__(title="Installation Summary", **kwargs)
         self.main_window = main_window
         self.config_rows = {}
+        
+        # Fix scrolling conflicts with main window
+        self.set_vexpand(False)
+        self.set_hexpand(True)
 
         # --- Header Section ---
         header_group = Adw.PreferencesGroup()
