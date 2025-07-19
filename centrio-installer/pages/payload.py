@@ -40,15 +40,14 @@ DEFAULT_PACKAGE_GROUPS = {
     "productivity": {
         "name": "Productivity Suite",
         "description": "Office applications and productivity tools",
-        "packages": ["thunderbird", "gimp"],
+        "packages": ["thunderbird"],
         "flatpak_packages": ["org.libreoffice.LibreOffice", "org.mozilla.firefox"],
         "required": False,
-        "selected": False
+        "selected": True
     },
     "gaming": {
         "name": "Gaming Support",
         "description": "Steam and gaming-related packages",
-        "packages": ["gamemode"],
         "flatpak_packages": ["com.valvesoftware.Steam", "net.lutris.Lutris", "org.winehq.Wine"],
         "required": False,
         "selected": False
