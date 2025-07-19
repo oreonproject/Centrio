@@ -958,138 +958,24 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     grub_target_disk = primary_disk # Needed for BIOS install
     
     if is_uefi:
-        print(f"UEFI system detected. Setting up GRUB for UEFI boot ({bootloader_id}).")
+        print(f"UEFI system detected. Setting up GRUB with Secure Boot support ({bootloader_id}).")
         if not efi_partition_device:
              return False, "UEFI system detected but EFI partition path not provided.", None
              
-        efi_mount_point = os.path.join(target_root, "boot/efi")
-        boot_target_dir = os.path.join(efi_mount_point, "EFI/BOOT")
-        shim_target_path = os.path.join(boot_target_dir, "BOOTX64.EFI") # Shim takes the default boot path
-        grub_target_path = os.path.join(boot_target_dir, "grubx64.efi") # GRUB loaded by Shim
+        # Use grub2-install for UEFI instead of manual file copying
+        grub_install_cmd = [
+            "grub2-install", 
+            "--target=x86_64-efi", 
+            "--efi-directory=/boot/efi",
+            "--bootloader-id=Oreon",
+            "--recheck"
+        ]
         
-        # --- Find shim*.efi and grubx64.efi within the chroot --- 
-        shim_source_path_in_chroot = None
-        grub_source_path_in_chroot = None
-        
-        # --- Sync filesystem before searching --- 
-        print("Running sync before searching for EFI files...")
-        try:
-            subprocess.run(["sync"], check=False, timeout=15)
-            time.sleep(2) # Add a 2-second delay
-            subprocess.run(["sync"], check=False, timeout=15)
-            print("Sync complete.")
-        except Exception as sync_e:
-            print(f"Warning: Sync before find failed: {sync_e}")
-        # --- End sync ---
-        
-        print("Searching for shim*.efi within the target system...")
-        # Broaden search to find any shim file
-        find_shim_cmd = ["find", "/", "-name", "shim*.efi"]
-        find_shim_success, find_shim_err, find_shim_stdout = _run_in_chroot(target_root, find_shim_cmd, "Find shim*.efi")
-        
-        if find_shim_success and find_shim_stdout:
-            found_shims = [line.strip() for line in find_shim_stdout.splitlines() if line.strip()]
-            print(f"  Found potential shim files: {found_shims}")
-            # Select the best match (prefer x64/x86_64)
-            for shim_path in found_shims:
-                if "x64" in shim_path.lower() or "x86_64" in shim_path.lower():
-                    shim_source_path_in_chroot = shim_path
-                    break
-            if not shim_source_path_in_chroot and found_shims:
-                shim_source_path_in_chroot = found_shims[0] # Fallback to first found
+        success, err, _ = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB with Secure Boot", progress_callback, timeout=120)
+        if not success:
+            return False, f"Failed to install GRUB for UEFI: {err}", None
             
-            if shim_source_path_in_chroot:
-                 print(f"  Selected shim file: {shim_source_path_in_chroot}")
-            else:
-                 # This case should not be reached if find_shim_stdout was non-empty
-                 return False, "Could not select a suitable shim file from find results.", None
-        else:
-            # Try to install shim packages explicitly if not found
-            print("Shim files not found, attempting to install shim packages...")
-            shim_install_cmd = ["dnf", "install", "-y", "shim-x64", "shim", f"--installroot={target_root}"]
-            install_success, install_err, _ = _run_command(shim_install_cmd, "Install shim packages", timeout=120)
-            if install_success:
-                # Try finding shim files again
-                find_shim_success, find_shim_err, find_shim_stdout = _run_in_chroot(target_root, find_shim_cmd, "Find shim*.efi after install")
-                if find_shim_success and find_shim_stdout:
-                    found_shims = [line.strip() for line in find_shim_stdout.splitlines() if line.strip()]
-                    if found_shims:
-                        shim_source_path_in_chroot = found_shims[0]
-                        print(f"Found shim file after explicit install: {shim_source_path_in_chroot}")
-                    else:
-                        return False, f"Shim packages installed but no shim*.efi files found in {target_root}", None
-                else:
-                    return False, f"Shim packages installed but find command failed: {find_shim_err}", None
-            else:
-                return False, f"Could not find or install shim*.efi files. Find error: {find_shim_err}, Install error: {install_err}", None
-            
-        print("Searching for grubx64.efi within the target system...")
-        # Keep grub search specific for now
-        find_grub_cmd = ["find", "/", "-name", "grubx64.efi"]
-        find_grub_success, find_grub_err, find_grub_stdout = _run_in_chroot(target_root, find_grub_cmd, "Find grubx64.efi")
-        if find_grub_success and find_grub_stdout:
-            # Take the first line found
-            grub_source_path_in_chroot = find_grub_stdout.splitlines()[0].strip()
-            print(f"  Found grubx64.efi at: {grub_source_path_in_chroot}")
-        else:
-            return False, f"Could not find grubx64.efi within {target_root}. Error: {find_grub_err}", None
-            
-        # Convert chroot paths to host paths for shutil
-        shim_source_path_on_host = os.path.join(target_root, shim_source_path_in_chroot.lstrip('/'))
-        grub_source_path_on_host = os.path.join(target_root, grub_source_path_in_chroot.lstrip('/'))
-        
-        # --- Manually Copy Files --- 
-        try:
-            print(f"  Creating EFI boot directory: {boot_target_dir}...")
-            os.makedirs(boot_target_dir, exist_ok=True)
-            
-            print(f"  Copying {shim_source_path_on_host} -> {shim_target_path}...")
-            shutil.copy2(shim_source_path_on_host, shim_target_path)
-            
-            print(f"  Copying {grub_source_path_on_host} -> {grub_target_path}...")
-            shutil.copy2(grub_source_path_on_host, grub_target_path)
-            
-        except Exception as e:
-            err_msg = f"Failed during manual copy of EFI files: {e}"
-            print(f"ERROR: {err_msg}")
-            return False, err_msg, None
-            
-        # --- Run efibootmgr to register boot entry --- 
-        print(f"Attempting to register boot entry using efibootmgr for {efi_partition_device}...")
-        match = re.match(r"(/dev/[a-zA-Z]+)(\d+)", efi_partition_device) or \
-                re.match(r"(/dev/nvme\d+n\d+)p(\d+)", efi_partition_device)
-        
-        if match:
-            efi_disk = match.group(1)
-            efi_part_num = match.group(2)
-            
-            # Try to register with the copied files
-            loaders_to_try = [
-                ("\\EFI\\BOOT\\BOOTX64.EFI", "Shim (BOOTX64.EFI)"),
-                ("\\EFI\\BOOT\\grubx64.efi", "GRUB (grubx64.efi)")
-            ]
-            
-            boot_entry_created = False
-            for loader_path, loader_desc in loaders_to_try:
-                print(f"Trying to register {loader_desc}...")
-                efibootmgr_cmd = [
-                    "efibootmgr", "-c", 
-                    "-d", efi_disk, "-p", efi_part_num,
-                    "-L", bootloader_id, "-l", loader_path
-                ]
-                
-                efibm_success, efibm_err, _ = _run_in_chroot(target_root, efibootmgr_cmd, f"Register EFI Boot Entry ({loader_desc})", progress_callback, timeout=60)
-                if efibm_success:
-                    print(f"Successfully registered boot entry with {loader_desc}.")
-                    boot_entry_created = True
-                    break
-                else:
-                    print(f"Failed to register {loader_desc}: {efibm_err}")
-            
-            if not boot_entry_created:
-                print("Warning: Could not register any boot entry with efibootmgr, but bootloader files are installed.")
-        else:
-            print(f"Warning: Could not parse disk/partition from {efi_partition_device}. Cannot run efibootmgr.")
+        print("GRUB installed successfully with Secure Boot support.")
 
     else: # BIOS System
         print(f"BIOS system detected, installing GRUB for BIOS using grub2-install ({bootloader_id}).")
