@@ -10,7 +10,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib
 
-from pages.base import BaseConfigurationPage
+from .base import BaseConfigurationPage
 # D-Bus imports are no longer needed here
 # from ..utils import dasbus, DBusError, dbus_available 
 # from ..constants import (...) 

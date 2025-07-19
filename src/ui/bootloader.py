@@ -5,7 +5,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw
 
-from pages.base import BaseConfigurationPage
+from .base import BaseConfigurationPage
 
 class BootloaderPage(BaseConfigurationPage):
     """Page for Bootloader Configuration (Placeholder)."""

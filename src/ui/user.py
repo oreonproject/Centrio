@@ -7,7 +7,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw
 
-from pages.base import BaseConfigurationPage
+from .base import BaseConfigurationPage
 # Removed D-Bus imports
 
 class UserPage(BaseConfigurationPage):

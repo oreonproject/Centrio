@@ -7,7 +7,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw
 
-from pages.base import BaseConfigurationPage
+from .base import BaseConfigurationPage
 # Import layout list getter
 from utils import ana_get_keyboard_layouts
 # Removed D-Bus imports

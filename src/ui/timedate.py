@@ -7,7 +7,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw
 
-from pages.base import BaseConfigurationPage
+from .base import BaseConfigurationPage
 # Use ana_get_all_regions_and_timezones from utils
 from utils import ana_get_all_regions_and_timezones
 # Removed D-Bus imports
