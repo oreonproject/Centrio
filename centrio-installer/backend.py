@@ -913,7 +913,7 @@ def install_packages_dnf(target_root, progress_callback=None):
         "repositories": [],
         "flatpak_enabled": False,
         "minimal_install": False,
-        "keep_cache": True
+        "keep_cache": False
     }
     
     return install_packages_enhanced(target_root, package_config, progress_callback)
@@ -958,7 +958,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     grub_target_disk = primary_disk # Needed for BIOS install
     
     if is_uefi:
-        print(f"UEFI system detected. Setting up GRUB+Shim manually for Secure Boot ({bootloader_id}).")
+        print(f"UEFI system detected. Setting up GRUB for UEFI boot ({bootloader_id}).")
         if not efi_partition_device:
              return False, "UEFI system detected but EFI partition path not provided.", None
              
@@ -1004,7 +1004,24 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
                  # This case should not be reached if find_shim_stdout was non-empty
                  return False, "Could not select a suitable shim file from find results.", None
         else:
-            return False, f"Could not find any shim*.efi file within {target_root}. Error: {find_shim_err}", None
+            # Try to install shim packages explicitly if not found
+            print("Shim files not found, attempting to install shim packages...")
+            shim_install_cmd = ["dnf", "install", "-y", "shim-x64", "shim", f"--installroot={target_root}"]
+            install_success, install_err, _ = _run_command(shim_install_cmd, "Install shim packages", timeout=120)
+            if install_success:
+                # Try finding shim files again
+                find_shim_success, find_shim_err, find_shim_stdout = _run_in_chroot(target_root, find_shim_cmd, "Find shim*.efi after install")
+                if find_shim_success and find_shim_stdout:
+                    found_shims = [line.strip() for line in find_shim_stdout.splitlines() if line.strip()]
+                    if found_shims:
+                        shim_source_path_in_chroot = found_shims[0]
+                        print(f"Found shim file after explicit install: {shim_source_path_in_chroot}")
+                    else:
+                        return False, f"Shim packages installed but no shim*.efi files found in {target_root}", None
+                else:
+                    return False, f"Shim packages installed but find command failed: {find_shim_err}", None
+            else:
+                return False, f"Could not find or install shim*.efi files. Find error: {find_shim_err}, Install error: {install_err}", None
             
         print("Searching for grubx64.efi within the target system...")
         # Keep grub search specific for now
@@ -1037,7 +1054,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             print(f"ERROR: {err_msg}")
             return False, err_msg, None
             
-        # --- Run efibootmgr to register Shim --- 
+        # --- Run efibootmgr to register boot entry --- 
         print(f"Attempting to register boot entry using efibootmgr for {efi_partition_device}...")
         match = re.match(r"(/dev/[a-zA-Z]+)(\d+)", efi_partition_device) or \
                 re.match(r"(/dev/nvme\d+n\d+)p(\d+)", efi_partition_device)
@@ -1045,19 +1062,32 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         if match:
             efi_disk = match.group(1)
             efi_part_num = match.group(2)
-            loader_path = "\\EFI\\BOOT\\BOOTX64.EFI" # Path to Shim (BOOTX64.EFI)
             
-            efibootmgr_cmd = [
-                "efibootmgr", "-c", 
-                "-d", efi_disk, "-p", efi_part_num,
-                "-L", bootloader_id, "-l", loader_path # Use hardcoded bootloader_id
+            # Try to register with the copied files
+            loaders_to_try = [
+                ("\\EFI\\BOOT\\BOOTX64.EFI", "Shim (BOOTX64.EFI)"),
+                ("\\EFI\\BOOT\\grubx64.efi", "GRUB (grubx64.efi)")
             ]
             
-            efibm_success, efibm_err, _ = _run_in_chroot(target_root, efibootmgr_cmd, "Register EFI Boot Entry", progress_callback, timeout=60)
-            if not efibm_success:
-                print(f"Warning: efibootmgr failed to create boot entry: {efibm_err}")
-            else:
-                print("Successfully registered boot entry with efibootmgr.")
+            boot_entry_created = False
+            for loader_path, loader_desc in loaders_to_try:
+                print(f"Trying to register {loader_desc}...")
+                efibootmgr_cmd = [
+                    "efibootmgr", "-c", 
+                    "-d", efi_disk, "-p", efi_part_num,
+                    "-L", bootloader_id, "-l", loader_path
+                ]
+                
+                efibm_success, efibm_err, _ = _run_in_chroot(target_root, efibootmgr_cmd, f"Register EFI Boot Entry ({loader_desc})", progress_callback, timeout=60)
+                if efibm_success:
+                    print(f"Successfully registered boot entry with {loader_desc}.")
+                    boot_entry_created = True
+                    break
+                else:
+                    print(f"Failed to register {loader_desc}: {efibm_err}")
+            
+            if not boot_entry_created:
+                print("Warning: Could not register any boot entry with efibootmgr, but bootloader files are installed.")
         else:
             print(f"Warning: Could not parse disk/partition from {efi_partition_device}. Cannot run efibootmgr.")
 

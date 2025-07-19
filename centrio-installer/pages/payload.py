@@ -12,7 +12,7 @@ DEFAULT_PACKAGE_GROUPS = {
     "core": {
         "name": "Core System",
         "description": "Essential system packages (required)",
-        "packages": ["@core", "kernel", "grub2-efi-x64", "grub2-pc", "NetworkManager", "systemd-resolved", "flatpak", "xdg-desktop-portal", "xdg-desktop-portal-gtk"],
+        "packages": ["@core", "kernel", "grub2-efi-x64", "grub2-efi-x64-modules", "grub2-pc", "grub2-common", "grub2-tools", "shim-x64", "shim", "efibootmgr", "NetworkManager", "systemd-resolved", "flatpak", "xdg-desktop-portal", "xdg-desktop-portal-gtk"],
         "required": True,
         "selected": True
     },
@@ -168,7 +168,7 @@ class PayloadPage(BaseConfigurationPage):
             title="Keep Package Cache",
             subtitle="Preserve downloaded packages for faster reinstallation"
         )
-        self.cache_row.set_active(True)
+        self.cache_row.set_active(False)
         self.advanced_section.add(self.cache_row)
         
         # Confirm button
