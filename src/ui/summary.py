@@ -1,4 +1,4 @@
-# centrio_installer/pages/summary.py
+# centrio_installer/ui/summary.py
 
 import gi
 gi.require_version('Gtk', '4.0')

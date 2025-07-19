@@ -11,18 +11,18 @@ except ImportError:
     raise
 
 # Import Page classes (Fixed to absolute imports)
-from pages.welcome import WelcomePage
-from pages.summary import SummaryPage
-from pages.progress import ProgressPage
-from pages.finished import FinishedPage
-from pages.keyboard import KeyboardPage
-from pages.language import LanguagePage
-from pages.timedate import TimeDatePage
-from pages.disk import DiskPage
-from pages.network import NetworkPage
-from pages.user import UserPage
-from pages.payload import PayloadPage
-from pages.bootloader import BootloaderPage
+from ui.welcome import WelcomePage
+from ui.summary import SummaryPage
+from ui.progress import ProgressPage
+from ui.finished import FinishedPage
+from ui.keyboard import KeyboardPage
+from ui.language import LanguagePage
+from ui.timedate import TimeDatePage
+from ui.disk import DiskPage
+from ui.network import NetworkPage
+from ui.user import UserPage
+from ui.payload import PayloadPage
+from ui.bootloader import BootloaderPage
 
 class CentrioInstallerWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
@@ -33,7 +33,7 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
         self.main_page_order = ["welcome", "summary", "progress", "finished"]
         # All known configuration page keys
         self.config_page_keys = ["keyboard", "language", "timedate", "disk", "network", "user", "payload", "bootloader"]
-        self.final_config = {} # Stores final selected values passed back from pages
+        self.final_config = {} # Stores final selected values passed back from ui
 
         self.set_title("Centrio Installer")
         self.set_default_size(700, 700)  # Smaller default size for better screen fit
@@ -58,8 +58,8 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
         self.view_stack = Adw.ViewStack()
         scrolled_window.set_child(self.view_stack)
 
-        # --- Add pages to the stack --- 
-        # Main flow pages
+        # --- Add ui to the stack ---
+        # Main flow ui
         self.welcome_page = WelcomePage()
         self.view_stack.add_titled(self.welcome_page, self.main_page_order[0], "Welcome")
 
@@ -73,7 +73,7 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
         self.finished_page = FinishedPage(app=self.get_application())
         self.view_stack.add_titled(self.finished_page, self.main_page_order[3], "Finished")
 
-        # Configuration pages - Pass main_window and the overlay
+        # Configuration ui - Pass main_window and the overlay
         self.keyboard_page = KeyboardPage(main_window=self, overlay_widget=self.toast_overlay)
         self.view_stack.add_titled(self.keyboard_page, "keyboard", "Keyboard Settings")
         
@@ -265,7 +265,7 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
             self.back_button.set_sensitive(can_go_back)
             self.back_button.set_visible(current_page_name != "finished") # Hide on finished
         else:
-            # Should be unreachable if pages are named correctly
+            # Should be unreachable if ui are named correctly
             self.back_button.set_sensitive(False)
             self.back_button.set_visible(True)
 
@@ -275,7 +275,7 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
         self.next_button.set_visible(True) # Assume visible unless on finished page
         
         if is_config_page:
-            # Config pages handle their own primary action via their own buttons.
+            # Config ui handle their own primary action via their own buttons.
             # The main 'Next' button should ideally just return to summary.
             self.next_button.set_label("Return to Summary")
             self.next_button.set_sensitive(True)

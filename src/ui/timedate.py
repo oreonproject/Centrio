@@ -1,4 +1,4 @@
-# centrio_installer/pages/timedate.py
+# centrio_installer/ui/timedate.py
 
 import gi
 import subprocess # For timedatectl

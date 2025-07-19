@@ -1,4 +1,4 @@
-# centrio_installer/pages/language.py
+# centrio_installer/ui/language.py
 
 import gi
 import subprocess # For localectl

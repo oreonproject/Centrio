@@ -1,4 +1,4 @@
-# centrio_installer/pages/disk.py
+# centrio_installer/ui/disk.py
 
 import gi
 import subprocess # For running lsblk

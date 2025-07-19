@@ -1,4 +1,4 @@
-# centrio_installer/pages/welcome.py
+# centrio_installer/ui/welcome.py
 
 import gi
 gi.require_version('Gtk', '4.0')

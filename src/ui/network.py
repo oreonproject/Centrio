@@ -1,4 +1,4 @@
-# centrio_installer/pages/network.py
+# centrio_installer/ui/network.py
 
 import gi
 import socket     # For getting current hostname

@@ -1,4 +1,4 @@
-# centrio_installer/pages/user.py
+# centrio_installer/ui/user.py
 
 import gi
 import subprocess # For useradd, chpasswd

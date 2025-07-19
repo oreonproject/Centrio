@@ -1,4 +1,4 @@
-# centrio_installer/pages/keyboard.py
+# centrio_installer/ui/keyboard.py
 
 import gi
 import subprocess # For localectl

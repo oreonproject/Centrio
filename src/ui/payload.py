@@ -1,4 +1,4 @@
-# centrio_installer/pages/payload.py
+# centrio_installer/ui/payload.py
 
 import gi
 gi.require_version('Gtk', '4.0')

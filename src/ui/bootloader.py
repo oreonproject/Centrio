@@ -1,4 +1,4 @@
-# centrio_installer/pages/bootloader.py
+# centrio_installer/ui/bootloader.py
 
 import gi
 gi.require_version('Gtk', '4.0')

@@ -1,4 +1,4 @@
-# centrio_installer/pages/base.py
+# centrio_installer/ui/base.py
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -9,7 +9,7 @@ from gi.repository import Gtk, Adw
 import backend
 
 class BaseConfigurationPage(Adw.PreferencesPage):
-    """Base class for configuration pages with common functionality."""
+    """Base class for configuration ui with common functionality."""
     
     def __init__(self, title, subtitle="", main_window=None, overlay_widget=None, **kwargs):
         super().__init__(title=title, **kwargs)

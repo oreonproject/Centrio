@@ -1,4 +1,4 @@
-# centrio_installer/pages/progress.py
+# centrio_installer/ui/progress.py
 
 import gi
 import subprocess # For command execution
