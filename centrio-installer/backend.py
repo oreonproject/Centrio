@@ -147,6 +147,11 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
     target_boot_path = os.path.join(target_root, "boot")
     if os.path.exists(target_boot_path):
         mount_points["boot"] = target_boot_path # Target is the same as source for bind mount
+        
+    # Add /boot/efi path if it exists and is mounted
+    target_boot_efi_path = os.path.join(target_root, "boot/efi")
+    if os.path.exists(target_boot_efi_path) and os.path.ismount(target_boot_efi_path):
+        mount_points["boot_efi"] = target_boot_efi_path
     
     try:
         # --- Mount API filesystems, resolv.conf, and D-Bus socket --- 
@@ -196,7 +201,8 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
             ("bind",    host_dbus_socket,      mount_points["dbus"],        None,      ["--bind"]),
             # Conditionally add efivars mount
             ("efivars", "efivarfs",            mount_points.get("efivars"), "efivarfs",["nosuid","noexec","nodev"]), # Source is the fstype
-            ("boot",    target_boot_path,      mount_points.get("boot"),      None,      ["--bind"])
+            ("boot",    target_boot_path,      mount_points.get("boot"),      None,      ["--bind"]),
+            ("boot_efi", target_boot_efi_path, mount_points.get("boot_efi"),  None,      ["--bind"])
         ]
 
         for name, source, target, fstype, options_list in mount_commands:
@@ -208,6 +214,11 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
             # Skip efivars mount if target wasn't added (host doesn't have it)
             if name == "efivars" and not target:
                  print(f"  Skipping efivars mount (host path {host_efi_vars_path} not found).")
+                 continue
+                 
+            # Skip boot_efi mount if target wasn't added (not mounted)
+            if name == "boot_efi" and not target:
+                 print(f"  Skipping boot_efi mount (EFI partition not mounted).")
                  continue
                  
             try:
@@ -973,19 +984,17 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         except Exception as e:
             return False, f"Failed to create EFI directory: {e}", None
         
-        # Find shimx64.efi in the target system
+        # Find shimx64.efi in the target system (check host paths directly)
         shim_paths = [
-            "/usr/share/shim/15.6-1/shimx64.efi",
-            "/usr/share/shim/shimx64.efi",
-            "/boot/efi/EFI/fedora/shimx64.efi"
+            f"{target_root}/usr/share/shim/15.6-1/shimx64.efi",
+            f"{target_root}/usr/share/shim/shimx64.efi",
+            f"{target_root}/boot/efi/EFI/fedora/shimx64.efi"
         ]
         
         shim_source = None
         for path in shim_paths:
-            test_cmd = ["test", "-f", path]
-            success, _, _ = _run_in_chroot(target_root, test_cmd, f"Test {path}")
-            if success:
-                shim_source = os.path.join(target_root, path.lstrip('/'))
+            if os.path.exists(path):
+                shim_source = path
                 print(f"Found shim at: {path}")
                 break
         

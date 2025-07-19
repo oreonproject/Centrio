@@ -68,13 +68,9 @@ def generate_gpt_commands(disk_path, efi_size_mb=512, filesystem="btrfs", dual_b
 def generate_mkfs_commands(disk_path, filesystem="btrfs", partition_prefix="", dual_boot=False, preserve_efi=False):
     """Generates mkfs commands for partitions with customizable filesystem type."""
     commands = []
-    # Determine partition device names
-    if "nvme" in disk_path:
-        part1 = f"{disk_path}{partition_prefix}1"
-        part2 = f"{disk_path}{partition_prefix}2"
-    else:
-        part1 = f"{disk_path}1"
-        part2 = f"{disk_path}2"
+    # Determine partition device names consistently
+    part1 = f"{disk_path}{partition_prefix}1"
+    part2 = f"{disk_path}{partition_prefix}2"
 
     if not (dual_boot and preserve_efi):
         # Format EFI partition only if not preserving existing
