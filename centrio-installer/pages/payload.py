@@ -19,7 +19,7 @@ DEFAULT_PACKAGE_GROUPS = {
     "desktop": {
         "name": "Desktop Environment",
         "description": "GNOME desktop environment and basic applications",
-        "packages": ["@gnome-desktop", "@core", "gnome-shell", "gdm", "gnome-terminal", "oreon-release", "oreon-logos", "gnome-shell-extension-*-oreon"],
+        "packages": ["@gnome-desktop", "@core", "gnome-shell", "gdm", "oreon-release", "oreon-logos", "gnome-shell-extension-*-oreon"],
         "required": False,
         "selected": True
     },
