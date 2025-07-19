@@ -962,20 +962,94 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         if not efi_partition_device:
              return False, "UEFI system detected but EFI partition path not provided.", None
              
-        # Use grub2-install for UEFI instead of manual file copying
+        # Set up proper secure boot with shim manually
+        efi_mount_point = os.path.join(target_root, "boot/efi")
+        boot_target_dir = os.path.join(efi_mount_point, "EFI/Oreon")
+        
+        # Create EFI directory
+        try:
+            os.makedirs(boot_target_dir, exist_ok=True)
+            print(f"Created EFI directory: {boot_target_dir}")
+        except Exception as e:
+            return False, f"Failed to create EFI directory: {e}", None
+        
+        # Find shimx64.efi in the target system
+        shim_paths = [
+            "/usr/share/shim/15.6-1/shimx64.efi",
+            "/usr/share/shim/shimx64.efi",
+            "/boot/efi/EFI/fedora/shimx64.efi"
+        ]
+        
+        shim_source = None
+        for path in shim_paths:
+            test_cmd = ["test", "-f", path]
+            success, _, _ = _run_in_chroot(target_root, test_cmd, f"Test {path}")
+            if success:
+                shim_source = os.path.join(target_root, path.lstrip('/'))
+                print(f"Found shim at: {path}")
+                break
+        
+        if not shim_source:
+            return False, "Could not find shimx64.efi in target system", None
+        
+        # grub2-install will create grubx64.efi for us
+        
+        # Use grub2-install to create grubx64.efi in the target directory
         grub_install_cmd = [
-            "grub2-install", 
+            "grub2-install",
             "--target=x86_64-efi", 
             "--efi-directory=/boot/efi",
             "--bootloader-id=Oreon",
-            "--recheck"
+            "--no-nvram"  # Don't register with efibootmgr yet
         ]
         
-        success, err, _ = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB with Secure Boot", progress_callback, timeout=120)
+        success, err, _ = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB EFI", timeout=120)
         if not success:
-            return False, f"Failed to install GRUB for UEFI: {err}", None
+            return False, f"Failed to install GRUB EFI: {err}", None
+        
+        # Copy shim files to create proper secure boot setup
+        try:
+            # Copy shimx64.efi as BOOTX64.EFI (default boot loader)
+            shim_target = os.path.join(boot_target_dir, "BOOTX64.EFI")
+            shutil.copy2(shim_source, shim_target)
+            print(f"Copied shim: {shim_source} -> {shim_target}")
             
-        print("GRUB installed successfully with Secure Boot support.")
+            # Copy shimx64.efi as shimx64.efi as well
+            shim_named_target = os.path.join(boot_target_dir, "shimx64.efi") 
+            shutil.copy2(shim_source, shim_named_target)
+            print(f"Copied shim: {shim_source} -> {shim_named_target}")
+            
+            # grubx64.efi should already be in the Oreon directory from grub2-install
+            grub_source = os.path.join(boot_target_dir, "grubx64.efi")
+            if not os.path.exists(grub_source):
+                return False, f"grubx64.efi not found at {grub_source} after grub2-install", None
+            print(f"Verified grubx64.efi exists at: {grub_source}")
+            
+        except Exception as e:
+            return False, f"Failed to copy EFI files: {e}", None
+        
+        # Register boot entry with efibootmgr pointing to our shim (BOOTX64.EFI)
+        match = re.match(r"(/dev/[a-zA-Z]+)(\d+)", efi_partition_device) or \
+                re.match(r"(/dev/nvme\d+n\d+)p(\d+)", efi_partition_device)
+        
+        if match:
+            efi_disk = match.group(1)
+            efi_part_num = match.group(2)
+            
+            efibootmgr_cmd = [
+                "efibootmgr", "-c",
+                "-d", efi_disk, "-p", efi_part_num,
+                "-L", "Oreon",
+                "-l", "\\EFI\\Oreon\\BOOTX64.EFI"  # Points to shim
+            ]
+            
+            success, err, _ = _run_in_chroot(target_root, efibootmgr_cmd, "Register secure boot entry", timeout=60)
+            if not success:
+                print(f"Warning: Failed to register boot entry: {err}")
+            else:
+                print("Successfully registered secure boot entry")
+                
+        print("Secure Boot with shim setup completed.")
 
     else: # BIOS System
         print(f"BIOS system detected, installing GRUB for BIOS using grub2-install ({bootloader_id}).")
