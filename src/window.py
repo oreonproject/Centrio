@@ -119,7 +119,7 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
 
         self.abort_button = Gtk.Button(label="Abort")
         self.abort_button.add_css_class("destructive-action")
-        self.abort_button.connect("clicked", self.exit_window())
+        self.abort_button.connect("clicked", self.exit_window)
         nav_box.append(self.abort_button)
 
         self.back_button = Gtk.Button(label="Back")
@@ -244,8 +244,7 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
         else:
              print(f"Warning: 'Back' clicked on first page ('{current_page_name}') or unknown page.")
 
-    @staticmethod
-    def exit_window():
+    def exit_window(self, button=None):
         """Handles the action for the Abort/Exit button."""
         print("Installation aborted by user.")
         print("Exiting Centrio Installer...")
