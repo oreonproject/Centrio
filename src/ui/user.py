@@ -50,20 +50,8 @@ class UserPage(BaseConfigurationPage):
         self.complete_button.add_css_class("suggested-action")
         button_group.add(self.complete_button)
 
-        # --- Input rules ---
-        username_rules = [
-            lambda t: bool(t),
-            lambda t: t.islower(),
-            lambda t: t.isalnum(),
-            lambda t: len(t) < 32
-        ]
-
-
         # --- Connect Signals for Validation ---
-        # self.password_row.connect("notify::text", self.validate_input)
-        self.username_row.remove_css_class("error") \
-            if self.validate(self.username_row,username_rules) else self.username_row.add_css_class("error")
-
+        self.username_row.connect("notify::text", self.validate_input)
         self.password_row.connect("notify::text", self.validate_input)
         self.confirm_password_row.connect("notify::text", self.validate_input)
         self.complete_button.connect("clicked", self.apply_settings_and_return)
@@ -76,11 +64,6 @@ class UserPage(BaseConfigurationPage):
     def connect_and_fetch_data(self):
          # Nothing to fetch for user creation
          pass 
-
-    @staticmethod
-    def validate(row, rules):
-        content = row.get_text().strip()
-        return all(rule(content) for rule in rules)
 
     def validate_input(self, widget=None, param=None):
         """Validate user input fields and update button sensitivity."""
