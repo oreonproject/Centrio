@@ -117,10 +117,15 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
         nav_box.set_margin_end(12)
         main_box.append(nav_box)
 
+        self.abort_button = Gtk.Button(label="Abort")
+        self.abort_button.add_css_class("destructive-action")
+        self.abort_button.connect("clicked", self.exit_window())
+        nav_box.append(self.abort_button)
+
         self.back_button = Gtk.Button(label="Back")
         self.back_button.connect("clicked", self.go_back)
         nav_box.append(self.back_button)
-        
+
         self.next_button = Gtk.Button(label="Next")
         self.next_button.add_css_class("suggested-action")
         self.next_button.connect("clicked", self.go_next)
@@ -236,11 +241,15 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
             if current_page_name == "progress": # Stop installation if going back from progress
                  self.progress_page.stop_installation()
             self.navigate_to_page(prev_page_name)
-        elif is_main_page and main_index == 0: # Otherwise you aren't able to quit
-            print(f"'Back' clicked on the first main page '{current_page_name}', exiting.")
-            sys.exit(0)
         else:
              print(f"Warning: 'Back' clicked on first page ('{current_page_name}') or unknown page.")
+
+    @staticmethod
+    def exit_window():
+        """Handles the action for the Abort/Exit button."""
+        print("Installation aborted by user.")
+        print("Exiting Centrio Installer...")
+        sys.exit(0)
 
     def update_navigation(self, stack=None, param=None):
         """Update the state of back/next buttons based on the current page."""
