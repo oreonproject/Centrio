@@ -20,7 +20,7 @@ class UserPage(BaseConfigurationPage):
         self.add(details_group)
         self.real_name_row = Adw.EntryRow(title="Full Name")
         details_group.add(self.real_name_row)
-        self.username_row = Adw.EntryRow(title="Username")
+        self.username_row = Adw.EntryRow(title="Username (lowercase, alphanumeric, max 32 chars)")
         details_group.add(self.username_row)
         
         password_group = Adw.PreferencesGroup(title="Password")
@@ -101,6 +101,14 @@ class UserPage(BaseConfigurationPage):
         # Get values 
         real_name = self.real_name_row.get_text().strip()
         username = self.username_row.get_text().strip()
+        try:
+            if not username.islower() or not username.isalnum():
+                print("Username must be lowercase and alphanumeric.")
+                self.username_row.set_text("")  # Clear input
+                # self.next_button.set_sensitive(False)  # Disable 'Next' if needed
+        except Exception as e:
+            print(f"Error checking username: {e}")
+
         password = self.password_row.get_text() # Get the password
         is_admin = self.admin_check.get_active()
 
