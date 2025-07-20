@@ -975,11 +975,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     For BIOS, uses grub2-install.
     """
     
-    # Get OS Name for Bootloader ID - No longer needed for label, keep for logs?
-    # os_info = get_os_release_info(target_root=target_root)
-    # print(f"DEBUG: os_info read from target_root '{target_root}': {os_info}")
-    # bootloader_id = os_info.get("NAME", "Centrio") # Use OS Name or fallback
-    bootloader_id = "Oreon" # Hardcode for reliability
+    bootloader_id = "Oreon"  # Hardcode for reliability
     print(f"Using bootloader ID: {bootloader_id}")
     
     # Detect if system is likely UEFI (check for /sys/firmware/efi)
@@ -988,61 +984,185 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     
     if is_uefi:
         print(f"UEFI system detected. Setting up GRUB with Secure Boot support ({bootloader_id}).")
-        if not efi_partition_device:
-             return False, "UEFI system detected but EFI partition path not provided.", None
-             
-        # Set up proper secure boot with shim manually
-        efi_mount_point = os.path.join(target_root, "boot/efi")
-        boot_target_dir = os.path.join(efi_mount_point, "EFI/Oreon")
         
-        # Verify EFI partition is mounted
-        if not os.path.exists(efi_mount_point):
-            return False, f"EFI mount point does not exist: {efi_mount_point}", None
+        # Enhanced EFI partition detection
+        if not efi_partition_device:
+            # Try to auto-detect EFI partition from mounted filesystems
+            efi_mount_point = os.path.join(target_root, "boot/efi")
+            if os.path.ismount(efi_mount_point):
+                # Find the device that mounted this partition
+                try:
+                    result = subprocess.run(
+                        ["findmnt", "-n", "-o", "SOURCE", "--target", efi_mount_point],
+                        capture_output=True, text=True, check=False, timeout=10
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        efi_partition_device = result.stdout.strip()
+                        print(f"Auto-detected EFI partition: {efi_partition_device}")
+                except Exception as e:
+                    print(f"Could not auto-detect EFI partition: {e}")
+            
+            if not efi_partition_device:
+                return False, "UEFI system detected but EFI partition path not provided and could not be auto-detected.", None
+        
+        # Verify EFI partition is properly mounted
+        efi_mount_point = os.path.join(target_root, "boot/efi")
+        
+        # Ensure EFI mount point exists
+        try:
+            os.makedirs(efi_mount_point, exist_ok=True)
+        except Exception as e:
+            return False, f"Failed to create EFI mount point: {e}", None
+        
+        # Check if EFI partition is already mounted
+        if not os.path.ismount(efi_mount_point):
+            # Try to mount the EFI partition
+            try:
+                mount_cmd = ["mount", efi_partition_device, efi_mount_point]
+                result = subprocess.run(mount_cmd, capture_output=True, text=True, check=False, timeout=30)
+                if result.returncode != 0:
+                    return False, f"Failed to mount EFI partition {efi_partition_device}: {result.stderr}", None
+                print(f"Successfully mounted EFI partition {efi_partition_device} to {efi_mount_point}")
+            except Exception as e:
+                return False, f"Error mounting EFI partition: {e}", None
+        
+        # Verify it's actually mounted and accessible
         if not os.path.ismount(efi_mount_point):
             return False, f"EFI partition is not mounted at: {efi_mount_point}", None
         
-        print(f"EFI partition verified at: {efi_mount_point}")
+        # Verify it's a FAT filesystem
+        try:
+            result = subprocess.run(
+                ["blkid", "-o", "value", "-s", "TYPE", efi_partition_device],
+                capture_output=True, text=True, check=False, timeout=10
+            )
+            if result.returncode == 0:
+                fs_type = result.stdout.strip()
+                if fs_type.lower() != "vfat":
+                    print(f"Warning: EFI partition has filesystem {fs_type}, expected vfat")
+            else:
+                print("Warning: Could not determine EFI partition filesystem type")
+        except Exception as e:
+            print(f"Warning: Could not verify EFI partition filesystem: {e}")
         
-        # Create EFI directory
+        print(f"EFI partition verified at: {efi_mount_point} (device: {efi_partition_device})")
+        
+        # Create EFI directory structure
+        boot_target_dir = os.path.join(efi_mount_point, "EFI", "Oreon")
         try:
             os.makedirs(boot_target_dir, exist_ok=True)
             print(f"Created EFI directory: {boot_target_dir}")
         except Exception as e:
             return False, f"Failed to create EFI directory: {e}", None
         
-        # Find shimx64.efi in the target system (check host paths directly)
-        shim_paths = [
+        # Enhanced shim file detection with better fallback locations
+        shim_source = None
+        shim_search_paths = [
+            # Standard locations for shim-x64 package
+            f"{target_root}/usr/share/shim/15.8-2/shimx64.efi",
+            f"{target_root}/usr/share/shim/15.7-1/shimx64.efi",
             f"{target_root}/usr/share/shim/15.6-1/shimx64.efi",
+            f"{target_root}/usr/share/shim/15.4-5/shimx64.efi",
+            f"{target_root}/usr/share/shim/15.4-4/shimx64.efi",
+            f"{target_root}/usr/share/shim/15.4-3/shimx64.efi",
+            f"{target_root}/usr/share/shim/15.4-2/shimx64.efi",
+            f"{target_root}/usr/share/shim/15.4-1/shimx64.efi",
             f"{target_root}/usr/share/shim/shimx64.efi",
-            f"{target_root}/boot/efi/EFI/fedora/shimx64.efi"
+            f"{target_root}/boot/efi/EFI/fedora/shimx64.efi",
+            f"{target_root}/boot/efi/EFI/centos/shimx64.efi",
+            f"{target_root}/boot/efi/EFI/rhel/shimx64.efi",
+            f"{target_root}/boot/efi/EFI/rocky/shimx64.efi",
+            f"{target_root}/boot/efi/EFI/almalinux/shimx64.efi",
+            f"{target_root}/boot/efi/EFI/ubuntu/shimx64.efi",
+            f"{target_root}/boot/efi/EFI/debian/shimx64.efi",
+            # Alternative naming conventions
+            f"{target_root}/usr/lib/shim/shimx64.efi",
+            f"{target_root}/usr/lib64/shim/shimx64.efi",
+            f"{target_root}/usr/share/efi/x86_64/shimx64.efi",
+            f"{target_root}/usr/share/efi/shimx64.efi",
         ]
         
-        shim_source = None
-        for path in shim_paths:
-            if os.path.exists(path):
+        # Check standard locations first
+        for path in shim_search_paths:
+            if os.path.exists(path) and os.path.getsize(path) > 0:
                 shim_source = path
-                print(f"Found shim at: {path}")
+                print(f"Found shim at standard location: {path}")
                 break
         
         if not shim_source:
-            # Try to find shim files in any location
-            print("Searching for shimx64.efi in target system...")
+            # Comprehensive search for shim files
+            print("Searching comprehensively for shimx64.efi...")
             try:
-                find_result = subprocess.run(
-                    ["find", target_root, "-name", "shimx64.efi", "-type", "f"],
-                    capture_output=True, text=True, timeout=30, check=False
-                )
-                if find_result.stdout.strip():
-                    found_files = find_result.stdout.strip().split('\n')
-                    shim_source = found_files[0]  # Use first found file
-                    print(f"Found shim via search: {shim_source}")
-                else:
-                    print("No shimx64.efi files found anywhere in target system")
+                # Search in common directories
+                search_dirs = [
+                    f"{target_root}/usr",
+                    f"{target_root}/boot",
+                    f"{target_root}/usr/lib",
+                    f"{target_root}/usr/share",
+                    f"{target_root}/usr/lib64",
+                ]
+                
+                for search_dir in search_dirs:
+                    if os.path.exists(search_dir):
+                        find_result = subprocess.run(
+                            ["find", search_dir, "-name", "shimx64.efi", "-type", "f", "-size", "+100k"],
+                            capture_output=True, text=True, timeout=30, check=False
+                        )
+                        if find_result.stdout.strip():
+                            found_files = [f.strip() for f in find_result.stdout.split('\n') if f.strip()]
+                            # Prefer larger files and those in standard locations
+                            valid_files = [f for f in found_files if os.path.getsize(f) > 100000]  # >100KB
+                            if valid_files:
+                                shim_source = valid_files[0]
+                                print(f"Found shim via search: {shim_source}")
+                                break
+                            else:
+                                shim_source = found_files[0]
+                                print(f"Found shim via search (fallback): {shim_source}")
+                                break
+                
+                # Also search for alternative names
+                if not shim_source:
+                    alt_names = ["shim.efi", "shim-x64.efi", "bootx64.efi", "grubx64.efi"]
+                    for alt_name in alt_names:
+                        find_result = subprocess.run(
+                            ["find", target_root, "-name", alt_name, "-type", "f", "-size", "+100k"],
+                            capture_output=True, text=True, timeout=30, check=False
+                        )
+                        if find_result.stdout.strip():
+                            found_files = find_result.stdout.strip().split('\n')
+                            shim_source = found_files[0]
+                            print(f"Found alternative bootloader file {alt_name}: {shim_source}")
+                            break
+                            
             except Exception as e:
-                print(f"Error searching for shim files: {e}")
-            
-            if not shim_source:
-                return False, "Could not find shimx64.efi in target system. Ensure shim-x64 package is installed.", None
+                print(f"Error during comprehensive shim search: {e}")
+        
+        if not shim_source:
+            # Last resort: check if we can install shim package
+            print("Checking if shim-x64 package can be installed...")
+            try:
+                check_shim_cmd = ["dnf", "list", "installed", "shim-x64", f"--installroot={target_root}"]
+                result = subprocess.run(check_shim_cmd, capture_output=True, text=True, check=False, timeout=30)
+                if result.returncode != 0:
+                    print("shim-x64 package not installed, attempting to install...")
+                    install_cmd = ["dnf", "install", "-y", "shim-x64", f"--installroot={target_root}"]
+                    install_result = subprocess.run(install_cmd, capture_output=True, text=True, check=False, timeout=120)
+                    if install_result.returncode == 0:
+                        print("Successfully installed shim-x64 package")
+                        # Re-search after installation
+                        for path in shim_search_paths:
+                            if os.path.exists(path):
+                                shim_source = path
+                                print(f"Found newly installed shim: {path}")
+                                break
+                    else:
+                        print(f"Failed to install shim-x64: {install_result.stderr}")
+            except Exception as e:
+                print(f"Error attempting to install shim-x64: {e}")
+        
+        if not shim_source:
+            return False, "Could not find shimx64.efi in target system. Please ensure the shim-x64 package is installed or manually copy shimx64.efi to /usr/share/shim/", None
         
         # Verify that required GRUB packages are installed
         required_grub_packages = ["grub2-efi-x64", "grub2-tools", "grub2-common"]
@@ -1056,22 +1176,41 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             except Exception as e:
                 print(f"Warning: Could not verify package {pkg}: {e}")
         
+        # Use the new package verification function
+        package_verify_result = verify_grub_packages(target_root)
+        if isinstance(package_verify_result, tuple) and not package_verify_result[0]:
+            return package_verify_result
+        
         # Use grub2-install to create grubx64.efi in the target directory
         grub_install_cmd = [
             "grub2-install",
             "--target=x86_64-efi", 
             "--efi-directory=/boot/efi",
             "--bootloader-id=Oreon",
-            "--no-nvram"  # Don't register with efibootmgr yet
+            "--no-nvram",  # Don't register with efibootmgr yet
+            "--removable"  # Add removable flag for better compatibility
         ]
         
         print(f"Running grub2-install command: {' '.join(grub_install_cmd)}")
-        success, err, stdout = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB EFI", timeout=120)
+        success, err, stdout = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB EFI", timeout=180)
         if not success:
             error_msg = f"Failed to install GRUB EFI: {err}"
             if stdout:
                 error_msg += f"\nStdout: {stdout}"
-            return False, error_msg, None
+            
+            # Try fallback installation method
+            print("Attempting fallback GRUB installation...")
+            fallback_cmd = [
+                "grub2-install",
+                "--target=x86_64-efi",
+                "--efi-directory=/boot/efi",
+                "--bootloader-id=Oreon",
+                "--force",
+                "--no-nvram"
+            ]
+            success, err, stdout = _run_in_chroot(target_root, fallback_cmd, "Install GRUB EFI (fallback)", timeout=180)
+            if not success:
+                return False, error_msg, None
         
         print("grub2-install completed successfully")
         
@@ -1132,40 +1271,169 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         except Exception as e:
             return False, f"Failed to copy EFI files: {e}", None
         
-        # Register boot entry with efibootmgr pointing to our shim (BOOTX64.EFI)
+        # Enhanced efibootmgr registration with better error handling and fallbacks
         match = re.match(r"(/dev/[a-zA-Z]+)(\d+)", efi_partition_device) or \
-                re.match(r"(/dev/nvme\d+n\d+)p(\d+)", efi_partition_device)
+                re.match(r"(/dev/nvme\d+n\d+)p(\d+)", efi_partition_device) or \
+                re.match(r"(/dev/mmcblk\d+)p(\d+)", efi_partition_device)
         
         if match:
             efi_disk = match.group(1)
             efi_part_num = match.group(2)
             
+            # Try multiple registration approaches
+            registration_success = False
+            registration_errors = []
+            
+            # Method 1: Standard registration
             efibootmgr_cmd = [
                 "efibootmgr", "-c",
                 "-d", efi_disk, "-p", efi_part_num,
                 "-L", "Oreon",
-                "-l", "\\EFI\\Oreon\\BOOTX64.EFI"  # Points to shim
+                "-l", "\\EFI\\Oreon\\BOOTX64.EFI"
             ]
             
-            success, err, _ = _run_in_chroot(target_root, efibootmgr_cmd, "Register secure boot entry", timeout=60)
-            if not success:
-                print(f"Warning: Failed to register boot entry: {err}")
+            print(f"Attempting standard boot entry registration: {' '.join(efibootmgr_cmd)}")
+            success, err, stdout = _run_in_chroot(target_root, efibootmgr_cmd, "Register secure boot entry", timeout=60)
+            if success:
+                print("Successfully registered secure boot entry (standard)")
+                registration_success = True
             else:
-                print("Successfully registered secure boot entry")
+                registration_errors.append(f"Standard method: {err}")
+                print(f"Standard registration failed: {err}")
+            
+            # Method 2: Try with removable media flag
+            if not registration_success:
+                efibootmgr_cmd_removable = [
+                    "efibootmgr", "-c",
+                    "-d", efi_disk, "-p", efi_part_num,
+                    "-L", "Oreon",
+                    "-l", "\\EFI\\Oreon\\BOOTX64.EFI",
+                    "--removable"
+                ]
+                
+                print("Attempting removable media boot entry registration...")
+                success, err, stdout = _run_in_chroot(target_root, efibootmgr_cmd_removable, "Register removable boot entry", timeout=60)
+                if success:
+                    print("Successfully registered removable boot entry")
+                    registration_success = True
+                else:
+                    registration_errors.append(f"Removable method: {err}")
+                    print(f"Removable registration failed: {err}")
+            
+            # Method 3: Try with different loader path
+            if not registration_success:
+                efibootmgr_cmd_alt = [
+                    "efibootmgr", "-c",
+                    "-d", efi_disk, "-p", efi_part_num,
+                    "-L", "Oreon",
+                    "-l", "\\EFI\\Oreon\\shimx64.efi"
+                ]
+                
+                print("Attempting alternative boot entry registration...")
+                success, err, stdout = _run_in_chroot(target_root, efibootmgr_cmd_alt, "Register alternative boot entry", timeout=60)
+                if success:
+                    print("Successfully registered alternative boot entry")
+                    registration_success = True
+                else:
+                    registration_errors.append(f"Alternative method: {err}")
+                    print(f"Alternative registration failed: {err}")
+            
+            # Method 4: Manual fallback - create fallback boot file
+            if not registration_success:
+                print("All registration methods failed, creating fallback boot file...")
+                try:
+                    # Create fallback boot file in standard location
+                    fallback_boot_file = os.path.join(efi_mount_point, "EFI", "BOOT", "BOOTX64.EFI")
+                    fallback_boot_dir = os.path.dirname(fallback_boot_file)
+                    os.makedirs(fallback_boot_dir, exist_ok=True)
+                    
+                    if os.path.exists(shim_target):
+                        shutil.copy2(shim_target, fallback_boot_file)
+                        print(f"Created fallback boot file: {fallback_boot_file}")
+                        registration_success = True
+                    else:
+                        print("Warning: Could not create fallback boot file - shim not found")
+                        
+                except Exception as e:
+                    print(f"Error creating fallback boot file: {e}")
+            
+            if not registration_success:
+                # Log all errors but don't fail the installation
+                error_summary = "; ".join(registration_errors)
+                print(f"WARNING: Failed to register boot entry with efibootmgr: {error_summary}")
+                print("The system may not boot automatically. You may need to:")
+                print("1. Manually add a boot entry in your UEFI firmware")
+                print("2. Use the fallback boot file at /EFI/BOOT/BOOTX64.EFI")
+                print("3. Boot from the installation media and run: efibootmgr -c -d {disk} -p {part} -L 'Oreon' -l '\\EFI\\Oreon\\BOOTX64.EFI'")
+                
+                # Don't fail the installation, just warn
+                print("Continuing installation despite boot entry registration failure...")
+        else:
+            print(f"WARNING: Could not parse EFI partition device: {efi_partition_device}")
+            print("Boot entry registration skipped - you may need to manually configure boot order")
                 
         print("Secure Boot with shim setup completed.")
 
     else: # BIOS System
         print(f"BIOS system detected, installing GRUB for BIOS using grub2-install ({bootloader_id}).")
-        # For BIOS, grub2-install doesn't use a bootloader ID directly in the MBR,
-        # but we use the variable for consistency in logs.
+        
+        # Verify BIOS GRUB packages are installed
+        bios_packages = ["grub2-pc", "grub2-common", "grub2-tools"]
+        missing_bios_packages = []
+        
+        for pkg in bios_packages:
+            check_cmd = ["rpm", "-q", pkg, f"--root={target_root}"]
+            try:
+                result = subprocess.run(check_cmd, capture_output=True, text=True, check=False, timeout=10)
+                if result.returncode != 0:
+                    missing_bios_packages.append(pkg)
+                else:
+                    print(f"Verified BIOS package installed: {pkg}")
+            except Exception as e:
+                print(f"Warning: Could not verify BIOS package {pkg}: {e}")
+        
+        if missing_bios_packages:
+            print(f"Missing BIOS GRUB packages: {missing_bios_packages}")
+            try:
+                install_cmd = ["dnf", "install", "-y"] + missing_bios_packages
+                install_cmd.append(f"--installroot={target_root}")
+                success, err, stdout = _run_in_chroot(target_root, install_cmd, "Install missing BIOS GRUB packages", timeout=180)
+                if not success:
+                    return False, f"Missing required BIOS GRUB packages: {', '.join(missing_bios_packages)}. Error: {err}", None
+            except Exception as e:
+                return False, f"Missing required BIOS GRUB packages: {', '.join(missing_bios_packages)}. Could not install: {e}", None
+        
+        # Enhanced BIOS installation with better error handling
         grub_install_cmd = [
             "grub2-install", 
             "--target=i386-pc", 
-            grub_target_disk # Install to the disk MBR/boot sector
+            "--force",  # Force installation even if some checks fail
+            "--recheck",  # Force probe of devices
+            grub_target_disk  # Install to the disk MBR/boot sector
         ]
-        success, err, _ = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB (BIOS)", progress_callback, timeout=120)
-        if not success: return False, err, None
+        
+        print(f"Running BIOS GRUB installation: {' '.join(grub_install_cmd)}")
+        success, err, stdout = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB (BIOS)", progress_callback, timeout=180)
+        
+        if not success:
+            error_msg = f"Failed to install GRUB for BIOS: {err}"
+            if stdout:
+                error_msg += f"\nStdout: {stdout}"
+            
+            # Try fallback BIOS installation
+            print("Attempting fallback BIOS GRUB installation...")
+            fallback_cmd = [
+                "grub2-install",
+                "--target=i386-pc",
+                "--force",
+                "--skip-fs-probe",  # Skip filesystem probing
+                grub_target_disk
+            ]
+            success, err, stdout = _run_in_chroot(target_root, fallback_cmd, "Install GRUB (BIOS fallback)", progress_callback, timeout=180)
+            if not success:
+                return False, error_msg, None
+        
+        print("BIOS GRUB installation completed successfully")
 
     # --- Generate GRUB config (Common to UEFI and BIOS) --- 
     print(f"Generating GRUB configuration file (grub.cfg) for {bootloader_id}...")
@@ -1199,7 +1467,86 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     if not success: return False, err, None
 
     print("Bootloader configuration steps completed.")
-    return True, "", None 
+    
+    # Comprehensive bootloader verification
+    print("=== Bootloader Installation Verification ===")
+    
+    verification_results = {
+        "uefi": is_uefi,
+        "bootloader_id": bootloader_id,
+        "primary_disk": primary_disk,
+        "efi_partition": efi_partition_device if is_uefi else None
+    }
+    
+    if is_uefi:
+        # UEFI-specific verification
+        efi_files_to_check = [
+            (os.path.join(boot_target_dir, "grubx64.efi"), "GRUB EFI executable"),
+            (os.path.join(boot_target_dir, "BOOTX64.EFI"), "Shim fallback bootloader"),
+            (os.path.join(boot_target_dir, "shimx64.efi"), "Shim bootloader"),
+            (os.path.join(efi_mount_point, "EFI", "BOOT", "BOOTX64.EFI"), "Fallback boot file")
+        ]
+        
+        missing_files = []
+        for file_path, description in efi_files_to_check:
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                print(f"✓ {description}: {file_path} ({os.path.getsize(file_path)} bytes)")
+            else:
+                print(f"✗ {description}: {file_path} - MISSING or empty")
+                missing_files.append(f"{description} ({file_path})")
+        
+        if missing_files:
+            print(f"WARNING: Missing UEFI files: {', '.join(missing_files)}")
+            # Don't fail, but warn user
+        else:
+            print("✓ All UEFI bootloader files present")
+            
+    else:
+        # BIOS-specific verification
+        print("Checking BIOS bootloader installation...")
+        
+        # Check if GRUB was installed to MBR
+        try:
+            # Use dd to check if GRUB signature is present in MBR
+            check_mbr_cmd = ["dd", "if=" + grub_target_disk, "bs=512", "count=1", "status=none"]
+            result = subprocess.run(check_mbr_cmd, capture_output=True, check=False)
+            if result.returncode == 0 and b"GRUB" in result.stdout:
+                print("✓ GRUB signature found in MBR")
+            else:
+                print("⚠ Could not verify GRUB signature in MBR")
+        except Exception as e:
+            print(f"⚠ Could not check MBR: {e}")
+    
+    # Common verification - check grub.cfg exists and is valid
+    grub_cfg_paths = [
+        os.path.join(target_root, "boot", "grub2", "grub.cfg"),
+        os.path.join(target_root, "boot", "grub", "grub.cfg"),
+        os.path.join(target_root, "boot", "efi", "EFI", "Oreon", "grub.cfg")
+    ]
+    
+    grub_cfg_found = False
+    for cfg_path in grub_cfg_paths:
+        if os.path.exists(cfg_path) and os.path.getsize(cfg_path) > 0:
+            print(f"✓ GRUB configuration found: {cfg_path}")
+            grub_cfg_found = True
+            break
+    
+    if not grub_cfg_found:
+        print("⚠ GRUB configuration file not found in expected locations")
+        return False, "GRUB configuration file (grub.cfg) was not created properly", None
+    
+    # Verify boot directory structure
+    boot_dir = os.path.join(target_root, "boot")
+    if os.path.exists(boot_dir):
+        print(f"✓ Boot directory exists: {boot_dir}")
+    else:
+        print("✗ Boot directory missing")
+        return False, "Boot directory does not exist", None
+    
+    print("=== Bootloader Installation Verification Complete ===")
+    
+    # Return success with detailed results
+    return True, "", verification_results
 
 def cleanup_efi_mount(target_root):
     """Clean up the EFI mount after bootloader installation is complete."""
@@ -1433,3 +1780,97 @@ def _remove_dm_mappings(disk_device, progress_callback=None):
     final_error_str = "\n".join(errors)
     # Return success overall unless a removal failed with an error other than "No such device"
     return all_success, final_error_str 
+
+# Enhanced GRUB package verification with distribution-specific handling
+def verify_grub_packages(target_root):
+    # Detect distribution type and set appropriate package names
+    os_info = get_os_release_info(target_root=target_root)
+    distro_id = os_info.get("ID", "unknown").lower()
+    distro_like = os_info.get("ID_LIKE", "").lower()
+    
+    print(f"Detected distribution: {distro_id}, like: {distro_like}")
+    
+    # Set package names based on distribution
+    if "fedora" in distro_id or "fedora" in distro_like:
+        required_grub_packages = [
+            "grub2-efi-x64",
+            "grub2-efi-x64-modules", 
+            "grub2-pc",
+            "grub2-common",
+            "grub2-tools",
+            "grub2-tools-efi",
+            "grub2-tools-minimal"
+        ]
+    elif "centos" in distro_id or "rhel" in distro_like or "rocky" in distro_like or "almalinux" in distro_like:
+        required_grub_packages = [
+            "grub2-efi-x64",
+            "grub2-efi-x64-modules",
+            "grub2-pc", 
+            "grub2-common",
+            "grub2-tools",
+            "grub2-tools-efi",
+            "grub2-tools-minimal"
+        ]
+    elif "ubuntu" in distro_id or "debian" in distro_like:
+        required_grub_packages = [
+            "grub-efi-amd64",
+            "grub-efi-amd64-bin",
+            "grub-common",
+            "grub2-common",
+            "grub-pc-bin"
+        ]
+    elif "arch" in distro_id or "archlinux" in distro_like:
+        required_grub_packages = [
+            "grub",
+            "efibootmgr"
+        ]
+    else:
+        # Generic fallback
+        required_grub_packages = [
+            "grub2-efi-x64",
+            "grub2-tools",
+            "grub2-common"
+        ]
+    
+    print(f"Checking for GRUB packages: {required_grub_packages}")
+    
+    missing_packages = []
+    for pkg in required_grub_packages:
+        check_cmd = ["rpm", "-q", pkg, f"--root={target_root}"]
+        try:
+            result = subprocess.run(check_cmd, capture_output=True, text=True, check=False, timeout=10)
+            if result.returncode != 0:
+                # Also check with dpkg for Debian-based systems
+                if "ubuntu" in distro_id or "debian" in distro_like:
+                    check_cmd = ["dpkg", "-l", pkg, f"--root={target_root}"]
+                    result = subprocess.run(check_cmd, capture_output=True, text=True, check=False, timeout=10)
+                    if result.returncode != 0:
+                        missing_packages.append(pkg)
+                else:
+                    missing_packages.append(pkg)
+            else:
+                print(f"Verified package installed: {pkg}")
+        except Exception as e:
+            print(f"Warning: Could not verify package {pkg}: {e}")
+    
+    if missing_packages:
+        print(f"Missing GRUB packages: {missing_packages}")
+        
+        # Try to install missing packages
+        try:
+            print("Attempting to install missing GRUB packages...")
+            if "ubuntu" in distro_id or "debian" in distro_like:
+                install_cmd = ["apt-get", "install", "-y"] + missing_packages
+            else:
+                install_cmd = ["dnf", "install", "-y"] + missing_packages
+            
+            install_cmd.append(f"--installroot={target_root}")
+            
+            success, err, stdout = _run_in_chroot(target_root, install_cmd, "Install missing GRUB packages", timeout=300)
+            if success:
+                print("Successfully installed missing GRUB packages")
+            else:
+                return False, f"Missing required GRUB packages: {', '.join(missing_packages)}. Error: {err}", None
+                
+        except Exception as e:
+            return False, f"Missing required GRUB packages: {', '.join(missing_packages)}. Could not install: {e}", None
