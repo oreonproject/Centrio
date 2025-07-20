@@ -1,4 +1,5 @@
 # centrio_installer/window.py
+import sys
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -235,6 +236,9 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
             if current_page_name == "progress": # Stop installation if going back from progress
                  self.progress_page.stop_installation()
             self.navigate_to_page(prev_page_name)
+        elif is_main_page and main_index == 0: # Otherwise you aren't able to quit
+            print(f"'Back' clicked on the first main page '{current_page_name}', exiting.")
+            sys.exit(0)
         else:
              print(f"Warning: 'Back' clicked on first page ('{current_page_name}') or unknown page.")
 

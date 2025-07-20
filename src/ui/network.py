@@ -17,7 +17,7 @@ class NetworkPage(BaseConfigurationPage):
         super().__init__(title="Network &amp; Hostname", subtitle="Configure hostname for the installed system", main_window=main_window, overlay_widget=overlay_widget, **kwargs)
         # No D-Bus proxy needed
         # self.network_proxy = None 
-        self.default_hostname = "Centrio" # Define default
+        self.default_hostname = "oreon-core" # Define default
 
         # --- UI Setup --- 
         net_group = Adw.PreferencesGroup()
