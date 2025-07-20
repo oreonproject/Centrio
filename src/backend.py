@@ -136,7 +136,7 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
         "resolv.conf": os.path.join(target_root, "etc/resolv.conf"),
         "dbus": target_dbus_socket # Add dbus socket target
     }
-    mounted_paths = set()
+    mounted_paths = []  # Changed to list to maintain order and store (target, name) tuples
     
     # Add efivars path if host supports EFI
     host_efi_vars_path = "/sys/firmware/efi/efivars"
@@ -282,14 +282,14 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
                 
                 print(f"  Mounting {source} -> {target} ({name}) with command: {' '.join(shlex.quote(c) for c in mount_cmd)}")
                 result = subprocess.run(mount_cmd, check=True, capture_output=True, text=True, timeout=15)
-                mounted_paths.add(target)
+                mounted_paths.append((target, name))
             except FileNotFoundError:
                  raise RuntimeError("Mount command failed: 'mount' executable not found.")
             except subprocess.CalledProcessError as e:
                 # Check if already mounted (exit code 32 often means this)
                 if e.returncode == 32 and ("already mounted" in e.stderr or "mount point does not exist" in e.stderr or "Not a directory" in e.stderr): # Added check for dbus socket
                     print(f"    Warning: Mount for {target} possibly already exists or target invalid? {e.stderr.strip()}")
-                    mounted_paths.add(target) 
+                    mounted_paths.append((target, name)) 
                 else:
                     raise RuntimeError(f"Failed to mount {source} to {target}: {e.stderr.strip()}") from e
             except Exception as e:
@@ -302,40 +302,36 @@ def _run_in_chroot(target_root, command_list, description, progress_callback=Non
         return success, err, stdout
         
     finally:
-        # --- Unmount everything in reverse order --- 
-        print(f"Cleaning up chroot environment in {target_root}...")
-        # Sync before attempting unmounts
-        try: subprocess.run(["sync"], check=False, timeout=5) 
-        except Exception: pass
-        
-        for target in sorted(list(mounted_paths), reverse=True):
-            print(f"  Unmounting {target}...")
-            umount_cmd = ["umount", target]
-            try:
-                 # Sync before each unmount attempt
-                 try: subprocess.run(["sync"], check=False, timeout=5) 
-                 except Exception: pass
+        # --- Unmount in reverse order ---
+        try:
+            print("Cleaning up chroot environment...")
+            for mount_info in reversed(mounted_paths):
+                 mount_target, mount_name = mount_info
                  
-                 # Try normal unmount first
-                 subprocess.run(umount_cmd, check=True, capture_output=True, text=True, timeout=15) 
-                 print(f"    Successfully unmounted {target}")
-            except subprocess.CalledProcessError as e_norm:
-                 print(f"    Warning: Normal unmount failed for {target}: {e_norm.stderr.strip()}. Trying lazy unmount...")
-                 # Sync before lazy unmount
-                 try: subprocess.run(["sync"], check=False, timeout=5) 
-                 except Exception: pass
-                 umount_lazy_cmd = ["umount", "-l", target]
+                 # Skip unmounting /boot/efi if we're in the middle of installation
+                 # It should remain mounted for bootloader installation
+                 if mount_name == "boot_efi":
+                     print(f"  Preserving EFI mount for bootloader installation: {mount_target}")
+                     continue
+                 
                  try:
-                      subprocess.run(umount_lazy_cmd, check=True, capture_output=True, text=True, timeout=10)
-                      print(f"      Lazy unmount successful for {target}")
-                 except Exception as e_lazy:
-                      print(f"      Warning: Lazy unmount also failed for {target}: {e_lazy}")
-            except Exception as e:
-                 print(f"    Warning: Error during unmount of {target}: {e}")
-        
-        # Final sync
-        try: subprocess.run(["sync"], check=False, timeout=5) 
-        except Exception: pass
+                     print(f"  Unmounting {mount_target}...")
+                     umount_cmd = ["umount", mount_target]
+                     result = subprocess.run(umount_cmd, capture_output=True, text=True, check=True, timeout=30)
+                     print(f"    Successfully unmounted {mount_target}")
+                 except subprocess.CalledProcessError as e:
+                     print(f"    Warning: Failed to unmount {mount_target}: {e.stderr.strip()}")
+                     # Try lazy unmount as fallback
+                     try:
+                         lazy_umount_cmd = ["umount", "-l", mount_target]
+                         subprocess.run(lazy_umount_cmd, capture_output=True, text=True, check=True, timeout=15)
+                         print(f"    Lazy unmount successful for {mount_target}")
+                     except Exception as lazy_e:
+                         print(f"    Warning: Lazy unmount also failed for {mount_target}: {lazy_e}")
+                 except Exception as e:
+                     print(f"    Warning: Error unmounting {mount_target}: {e}")
+        except Exception as e:
+            print(f"Warning: Error during chroot cleanup: {e}")
 
 # --- Configuration Functions ---
 
@@ -1204,6 +1200,30 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
 
     print("Bootloader configuration steps completed.")
     return True, "", None 
+
+def cleanup_efi_mount(target_root):
+    """Clean up the EFI mount after bootloader installation is complete."""
+    efi_mount_point = os.path.join(target_root, "boot/efi")
+    
+    if os.path.ismount(efi_mount_point):
+        print(f"Cleaning up EFI mount: {efi_mount_point}")
+        try:
+            subprocess.run(["sync"], check=False, timeout=5)
+            umount_cmd = ["umount", efi_mount_point]
+            result = subprocess.run(umount_cmd, capture_output=True, text=True, check=True, timeout=30)
+            print(f"Successfully unmounted EFI partition: {efi_mount_point}")
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: Failed to unmount EFI partition {efi_mount_point}: {e.stderr.strip()}")
+            try:
+                lazy_umount_cmd = ["umount", "-l", efi_mount_point]
+                subprocess.run(lazy_umount_cmd, capture_output=True, text=True, check=True, timeout=15)
+                print(f"Lazy unmount successful for EFI partition: {efi_mount_point}")
+            except Exception as lazy_e:
+                print(f"Warning: Lazy unmount also failed for EFI partition: {lazy_e}")
+        except Exception as e:
+            print(f"Warning: Error during EFI mount cleanup: {e}")
+    else:
+        print(f"EFI partition not mounted, no cleanup needed: {efi_mount_point}")
 
 # --- Service Management Helpers --- 
 def _manage_service(action, service_name):

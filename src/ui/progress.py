@@ -783,6 +783,8 @@ class ProgressPage(Gtk.Box):
         
         if success:
             self._update_progress_text("Bootloader installed.", 0.95)
+            # Clean up EFI mount after successful bootloader installation
+            backend.cleanup_efi_mount(self.target_root)
         else:
             self.installation_error = err
             
