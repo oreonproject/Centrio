@@ -19,19 +19,15 @@ class UserPage(BaseConfigurationPage):
         details_group = Adw.PreferencesGroup(title="User Details")
         self.add(details_group)
         self.real_name_row = Adw.EntryRow(title="Full Name")
-        self.real_name_row.add_css_class("warning")
         details_group.add(self.real_name_row)
         self.username_row = Adw.EntryRow(title="Username (lowercase, alphanumeric, max 32 chars)")
-        self.username_row.add_css_class("warning")
         details_group.add(self.username_row)
         
         password_group = Adw.PreferencesGroup(title="Password")
         self.add(password_group)
         self.password_row = Adw.PasswordEntryRow(title="Password")
-        self.password_row.add_css_class("warning")
         password_group.add(self.password_row)
         self.confirm_password_row = Adw.PasswordEntryRow(title="Confirm Password")
-        self.password_row.add_css_class("warning")
         password_group.add(self.confirm_password_row)
         
         # Add admin checkbox (optional)
@@ -54,8 +50,20 @@ class UserPage(BaseConfigurationPage):
         self.complete_button.add_css_class("suggested-action")
         button_group.add(self.complete_button)
 
+        # --- Input rules ---
+        username_rules = [
+            lambda t: bool(t),
+            lambda t: t.islower(),
+            lambda t: t.isalnum(),
+            lambda t: len(t) < 32
+        ]
+
+
         # --- Connect Signals for Validation ---
-        self.username_row.connect("notify::text", self.validate_input)
+        # self.password_row.connect("notify::text", self.validate_input)
+        self.username_row.remove_css_class("error") \
+            if self.validate(self.username_row,username_rules) else self.username_row.add_css_class("error")
+
         self.password_row.connect("notify::text", self.validate_input)
         self.confirm_password_row.connect("notify::text", self.validate_input)
         self.complete_button.connect("clicked", self.apply_settings_and_return)
@@ -68,6 +76,11 @@ class UserPage(BaseConfigurationPage):
     def connect_and_fetch_data(self):
          # Nothing to fetch for user creation
          pass 
+
+    @staticmethod
+    def validate(row, rules):
+        content = row.get_text().strip()
+        return all(rule(content) for rule in rules)
 
     def validate_input(self, widget=None, param=None):
         """Validate user input fields and update button sensitivity."""
