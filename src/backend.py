@@ -1055,114 +1055,101 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         except Exception as e:
             return False, f"Failed to create EFI directory: {e}", None
         
-        # Enhanced shim file detection with better fallback locations
+        # Copy bootloader files from live ISO instead of searching in chroot
+        print("Copying bootloader files from live ISO /boot directory...")
+        
+        # Search for bootloader files in the live ISO's /boot directory
         shim_source = None
-        shim_search_paths = [
-            # Standard locations for shim-x64 package
-            f"{target_root}/usr/share/shim/15.8-2/shimx64.efi",
-            f"{target_root}/usr/share/shim/15.7-1/shimx64.efi",
-            f"{target_root}/usr/share/shim/15.6-1/shimx64.efi",
-            f"{target_root}/usr/share/shim/15.4-5/shimx64.efi",
-            f"{target_root}/usr/share/shim/15.4-4/shimx64.efi",
-            f"{target_root}/usr/share/shim/15.4-3/shimx64.efi",
-            f"{target_root}/usr/share/shim/15.4-2/shimx64.efi",
-            f"{target_root}/usr/share/shim/15.4-1/shimx64.efi",
-            f"{target_root}/usr/share/shim/shimx64.efi",
-            f"{target_root}/boot/efi/EFI/fedora/shimx64.efi",
-            f"{target_root}/boot/efi/EFI/centos/shimx64.efi",
-            f"{target_root}/boot/efi/EFI/rhel/shimx64.efi",
-            f"{target_root}/boot/efi/EFI/rocky/shimx64.efi",
-            f"{target_root}/boot/efi/EFI/almalinux/shimx64.efi",
-            f"{target_root}/boot/efi/EFI/ubuntu/shimx64.efi",
-            f"{target_root}/boot/efi/EFI/debian/shimx64.efi",
-            # Alternative naming conventions
-            f"{target_root}/usr/lib/shim/shimx64.efi",
-            f"{target_root}/usr/lib64/shim/shimx64.efi",
-            f"{target_root}/usr/share/efi/x86_64/shimx64.efi",
-            f"{target_root}/usr/share/efi/shimx64.efi",
+        grub_source = None
+        
+        live_boot_search_paths = [
+            # Live ISO EFI directories
+            "/boot/efi/EFI/fedora/shimx64.efi",
+            "/boot/efi/EFI/centos/shimx64.efi", 
+            "/boot/efi/EFI/rhel/shimx64.efi",
+            "/boot/efi/EFI/rocky/shimx64.efi",
+            "/boot/efi/EFI/almalinux/shimx64.efi",
+            "/boot/efi/EFI/BOOT/BOOTX64.EFI",
+            "/boot/efi/EFI/BOOT/shimx64.efi",
+            # System directories on live ISO
+            "/usr/share/shim/shimx64.efi",
+            "/usr/lib/shim/shimx64.efi",
+            "/usr/lib64/shim/shimx64.efi",
         ]
         
-        # Check standard locations first
-        for path in shim_search_paths:
+        grub_search_paths = [
+            # Live ISO EFI directories
+            "/boot/efi/EFI/fedora/grubx64.efi",
+            "/boot/efi/EFI/centos/grubx64.efi",
+            "/boot/efi/EFI/rhel/grubx64.efi", 
+            "/boot/efi/EFI/rocky/grubx64.efi",
+            "/boot/efi/EFI/almalinux/grubx64.efi",
+            "/boot/efi/EFI/BOOT/grubx64.efi",
+            # System directories on live ISO
+            "/usr/lib/grub/x86_64-efi/grubx64.efi",
+            "/usr/share/grub/x86_64-efi/grubx64.efi",
+        ]
+        
+        # Find shim file
+        for path in live_boot_search_paths:
             if os.path.exists(path) and os.path.getsize(path) > 0:
                 shim_source = path
-                print(f"Found shim at standard location: {path}")
+                print(f"Found shim on live ISO: {path}")
                 break
         
+        # Find grub file
+        for path in grub_search_paths:
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                grub_source = path
+                print(f"Found grub on live ISO: {path}")
+                break
+        
+        # Comprehensive search if not found in standard locations
         if not shim_source:
-            # Comprehensive search for shim files
-            print("Searching comprehensively for shimx64.efi...")
+            print("Searching comprehensively for shimx64.efi on live ISO...")
             try:
-                # Search in common directories
-                search_dirs = [
-                    f"{target_root}/usr",
-                    f"{target_root}/boot",
-                    f"{target_root}/usr/lib",
-                    f"{target_root}/usr/share",
-                    f"{target_root}/usr/lib64",
-                ]
-                
-                for search_dir in search_dirs:
-                    if os.path.exists(search_dir):
-                        find_result = subprocess.run(
-                            ["find", search_dir, "-name", "shimx64.efi", "-type", "f", "-size", "+100k"],
-                            capture_output=True, text=True, timeout=30, check=False
-                        )
-                        if find_result.stdout.strip():
-                            found_files = [f.strip() for f in find_result.stdout.split('\n') if f.strip()]
-                            # Prefer larger files and those in standard locations
-                            valid_files = [f for f in found_files if os.path.getsize(f) > 100000]  # >100KB
-                            if valid_files:
-                                shim_source = valid_files[0]
-                                print(f"Found shim via search: {shim_source}")
-                                break
-                            else:
-                                shim_source = found_files[0]
-                                print(f"Found shim via search (fallback): {shim_source}")
-                                break
-                
-                # Also search for alternative names
-                if not shim_source:
-                    alt_names = ["shim.efi", "shim-x64.efi", "bootx64.efi", "grubx64.efi"]
-                    for alt_name in alt_names:
-                        find_result = subprocess.run(
-                            ["find", target_root, "-name", alt_name, "-type", "f", "-size", "+100k"],
-                            capture_output=True, text=True, timeout=30, check=False
-                        )
-                        if find_result.stdout.strip():
-                            found_files = find_result.stdout.strip().split('\n')
-                            shim_source = found_files[0]
-                            print(f"Found alternative bootloader file {alt_name}: {shim_source}")
-                            break
-                            
+                find_result = subprocess.run(
+                    ["find", "/boot", "/usr", "-name", "shimx64.efi", "-o", "-name", "BOOTX64.EFI", "-type", "f", "-size", "+100k"],
+                    capture_output=True, text=True, timeout=30, check=False
+                )
+                if find_result.stdout.strip():
+                    found_files = [f.strip() for f in find_result.stdout.split('\n') if f.strip()]
+                    # Prefer files in /boot/efi first, then others
+                    boot_efi_files = [f for f in found_files if "/boot/efi/" in f]
+                    if boot_efi_files:
+                        shim_source = boot_efi_files[0]
+                        print(f"Found shim via search (boot/efi): {shim_source}")
+                    else:
+                        shim_source = found_files[0]
+                        print(f"Found shim via search: {shim_source}")
             except Exception as e:
                 print(f"Error during comprehensive shim search: {e}")
         
-        if not shim_source:
-            # Last resort: check if we can install shim package
-            print("Checking if shim-x64 package can be installed...")
+        if not grub_source:
+            print("Searching comprehensively for grubx64.efi on live ISO...")
             try:
-                check_shim_cmd = ["dnf", "list", "installed", "shim-x64", f"--installroot={target_root}"]
-                result = subprocess.run(check_shim_cmd, capture_output=True, text=True, check=False, timeout=30)
-                if result.returncode != 0:
-                    print("shim-x64 package not installed, attempting to install...")
-                    install_cmd = ["dnf", "install", "-y", "shim-x64", f"--installroot={target_root}"]
-                    install_result = subprocess.run(install_cmd, capture_output=True, text=True, check=False, timeout=120)
-                    if install_result.returncode == 0:
-                        print("Successfully installed shim-x64 package")
-                        # Re-search after installation
-                        for path in shim_search_paths:
-                            if os.path.exists(path):
-                                shim_source = path
-                                print(f"Found newly installed shim: {path}")
-                                break
+                find_result = subprocess.run(
+                    ["find", "/boot", "/usr", "-name", "grubx64.efi", "-type", "f", "-size", "+100k"],
+                    capture_output=True, text=True, timeout=30, check=False
+                )
+                if find_result.stdout.strip():
+                    found_files = [f.strip() for f in find_result.stdout.split('\n') if f.strip()]
+                    # Prefer files in /boot/efi first, then others
+                    boot_efi_files = [f for f in found_files if "/boot/efi/" in f]
+                    if boot_efi_files:
+                        grub_source = boot_efi_files[0]
+                        print(f"Found grub via search (boot/efi): {grub_source}")
                     else:
-                        print(f"Failed to install shim-x64: {install_result.stderr}")
+                        grub_source = found_files[0]
+                        print(f"Found grub via search: {grub_source}")
             except Exception as e:
-                print(f"Error attempting to install shim-x64: {e}")
+                print(f"Error during comprehensive grub search: {e}")
         
         if not shim_source:
-            return False, "Could not find shimx64.efi in target system. Please ensure the shim-x64 package is installed or manually copy shimx64.efi to /usr/share/shim/", None
+            return False, "Could not find shimx64.efi or BOOTX64.EFI on live ISO. The live environment may be missing required bootloader files.", None
+            
+        if not grub_source:
+            print("Warning: Could not find grubx64.efi on live ISO. Will try to use grub2-install to create it.")
         
         # Verify that required GRUB packages are installed
         required_grub_packages = ["grub2-efi-x64", "grub2-tools", "grub2-common"]
@@ -1181,70 +1168,9 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         if isinstance(package_verify_result, tuple) and not package_verify_result[0]:
             return package_verify_result
         
-        # Use grub2-install to create grubx64.efi in the target directory
-        grub_install_cmd = [
-            "grub2-install",
-            "--target=x86_64-efi", 
-            "--efi-directory=/boot/efi",
-            "--bootloader-id=Oreon",
-            "--no-nvram",  # Don't register with efibootmgr yet
-            "--removable"  # Add removable flag for better compatibility
-        ]
-        
-        print(f"Running grub2-install command: {' '.join(grub_install_cmd)}")
-        success, err, stdout = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB EFI", timeout=180)
-        if not success:
-            error_msg = f"Failed to install GRUB EFI: {err}"
-            if stdout:
-                error_msg += f"\nStdout: {stdout}"
-            
-            # Try fallback installation method
-            print("Attempting fallback GRUB installation...")
-            fallback_cmd = [
-                "grub2-install",
-                "--target=x86_64-efi",
-                "--efi-directory=/boot/efi",
-                "--bootloader-id=Oreon",
-                "--force",
-                "--no-nvram"
-            ]
-            success, err, stdout = _run_in_chroot(target_root, fallback_cmd, "Install GRUB EFI (fallback)", timeout=180)
-            if not success:
-                return False, error_msg, None
-        
-        print("grub2-install completed successfully")
-        
-        # Copy shim files and ensure grub files exist
+        # Copy bootloader files from live ISO to target EFI directory
         try:
-            # Check if grub2-install actually created the files
-            grub_efi_dir = os.path.join(boot_target_dir)
-            grub_source = os.path.join(grub_efi_dir, "grubx64.efi")
-            
-            if not os.path.exists(grub_source):
-                # Find grubx64.efi elsewhere and copy it
-                grub_locations = [
-                    f"{target_root}/usr/lib/grub/x86_64-efi/grubx64.efi",
-                    f"{target_root}/usr/share/grub/x86_64-efi/grubx64.efi"
-                ]
-                
-                grub_found = None
-                for loc in grub_locations:
-                    if os.path.exists(loc):
-                        grub_found = loc
-                        break
-                
-                if grub_found:
-                    shutil.copy2(grub_found, grub_source)
-                    print(f"Copied grubx64.efi: {grub_found} -> {grub_source}")
-                else:
-                    return False, f"Could not find grubx64.efi anywhere in target system", None
-            else:
-                print(f"grubx64.efi already exists at: {grub_source}")
-            
-            # Verify grubx64.efi was created/copied successfully
-            if not os.path.exists(grub_source) or os.path.getsize(grub_source) == 0:
-                return False, f"grubx64.efi was not created properly at {grub_source}", None
-            
+            # Copy shim files first
             # Copy shimx64.efi as BOOTX64.EFI (default boot loader)
             shim_target = os.path.join(boot_target_dir, "BOOTX64.EFI")
             shutil.copy2(shim_source, shim_target)
@@ -1255,9 +1181,71 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             shutil.copy2(shim_source, shim_named_target)
             print(f"Copied shim: {shim_source} -> {shim_named_target}")
             
+            # Handle grub file
+            grub_target = os.path.join(boot_target_dir, "grubx64.efi")
+            
+            if grub_source:
+                # Copy grubx64.efi from live ISO
+                shutil.copy2(grub_source, grub_target)
+                print(f"Copied grub from live ISO: {grub_source} -> {grub_target}")
+            else:
+                # Try to use grub2-install to create grubx64.efi if we couldn't find it on live ISO
+                print("Attempting to create grubx64.efi using grub2-install...")
+                grub_install_cmd = [
+                    "grub2-install",
+                    "--target=x86_64-efi", 
+                    "--efi-directory=/boot/efi",
+                    "--bootloader-id=Oreon",
+                    "--no-nvram",  # Don't register with efibootmgr yet
+                    "--removable"  # Add removable flag for better compatibility
+                ]
+                
+                print(f"Running grub2-install command: {' '.join(grub_install_cmd)}")
+                success, err, stdout = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB EFI", timeout=180)
+                if not success:
+                    error_msg = f"Failed to install GRUB EFI: {err}"
+                    if stdout:
+                        error_msg += f"\nStdout: {stdout}"
+                    
+                    # Try fallback installation method
+                    print("Attempting fallback GRUB installation...")
+                    fallback_cmd = [
+                        "grub2-install",
+                        "--target=x86_64-efi",
+                        "--efi-directory=/boot/efi",
+                        "--bootloader-id=Oreon",
+                        "--force",
+                        "--no-nvram"
+                    ]
+                    success, err, stdout = _run_in_chroot(target_root, fallback_cmd, "Install GRUB EFI (fallback)", timeout=180)
+                    if not success:
+                        return False, error_msg, None
+                
+                print("grub2-install completed successfully")
+                
+                # Check if grub2-install created the file
+                if not os.path.exists(grub_target):
+                    # Try to find grubx64.efi in target system as last resort
+                    grub_locations = [
+                        f"{target_root}/usr/lib/grub/x86_64-efi/grubx64.efi",
+                        f"{target_root}/usr/share/grub/x86_64-efi/grubx64.efi"
+                    ]
+                    
+                    grub_found = None
+                    for loc in grub_locations:
+                        if os.path.exists(loc):
+                            grub_found = loc
+                            break
+                    
+                    if grub_found:
+                        shutil.copy2(grub_found, grub_target)
+                        print(f"Copied grubx64.efi from target system: {grub_found} -> {grub_target}")
+                    else:
+                        return False, f"Could not find or create grubx64.efi anywhere", None
+            
             # Verify all files were copied successfully
             required_files = [
-                (grub_source, "grubx64.efi"),
+                (grub_target, "grubx64.efi"),
                 (shim_target, "BOOTX64.EFI"), 
                 (shim_named_target, "shimx64.efi")
             ]
@@ -1265,6 +1253,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             for file_path, file_name in required_files:
                 if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
                     return False, f"Required EFI file {file_name} was not created properly at {file_path}", None
+                print(f"✓ Verified EFI file: {file_name} ({os.path.getsize(file_path)} bytes)")
             
             print("All EFI files copied and verified successfully")
             
