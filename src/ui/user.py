@@ -80,11 +80,6 @@ class UserPage(BaseConfigurationPage):
         valid_password = bool(password) and password == confirm
         can_apply = valid_user and valid_password
 
-        if not valid_user:
-            self.username_row.add_css_class("error")
-        else:
-            self.username_row.remove_css_class("error")
-
         # Visual feedback for password mismatch
         if password and confirm and password != confirm:
             self.password_row.add_css_class("error")
