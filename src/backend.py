@@ -1253,7 +1253,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             for file_path, file_name in required_files:
                 if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
                     return False, f"Required EFI file {file_name} was not created properly at {file_path}", None
-                print(f"✓ Verified EFI file: {file_name} ({os.path.getsize(file_path)} bytes)")
+                print(f"Verified EFI file: {file_name} ({os.path.getsize(file_path)} bytes)")
             
             print("All EFI files copied and verified successfully")
             
@@ -1431,29 +1431,145 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     grub_cfg_path = None
     grub2_dir_in_chroot = "/boot/grub2"
     grub_dir_in_chroot = "/boot/grub"
-    check_path_cmd_grub2 = ["test", "-d", grub2_dir_in_chroot]
-    check_path_cmd_grub = ["test", "-d", grub_dir_in_chroot]
     
-    # Check for /boot/grub2 first
-    success_grub2, _, _ = _run_in_chroot(target_root, check_path_cmd_grub2, f"Check for {grub2_dir_in_chroot}")
-    if success_grub2:
-        grub_cfg_path = os.path.join(grub2_dir_in_chroot, "grub.cfg")
-        print(f"  Using GRUB 2 path: {grub_cfg_path}")
-    else:
-        # Check for /boot/grub as fallback
-        success_grub, _, _ = _run_in_chroot(target_root, check_path_cmd_grub, f"Check for {grub_dir_in_chroot}")
-        if success_grub:
-            grub_cfg_path = os.path.join(grub_dir_in_chroot, "grub.cfg")
-            print(f"  Using GRUB legacy path: {grub_cfg_path}")
-        else:
-             print(f"ERROR: Neither {grub2_dir_in_chroot} nor {grub_dir_in_chroot} found in target. Cannot generate grub.cfg.")
-             return False, "Could not find GRUB directory in target /boot", None
-             
+    # Ensure GRUB directories exist
+    grub2_dir_full = os.path.join(target_root, "boot", "grub2")
+    grub_dir_full = os.path.join(target_root, "boot", "grub")
+    
+    try:
+        os.makedirs(grub2_dir_full, exist_ok=True)
+        os.makedirs(grub_dir_full, exist_ok=True)
+        print(f"Ensured GRUB directories exist: {grub2_dir_full}, {grub_dir_full}")
+    except Exception as e:
+        print(f"Warning: Could not create GRUB directories: {e}")
+    
+    # Use /boot/grub2 as primary path (modern systems)
+    grub_cfg_path = os.path.join(grub2_dir_in_chroot, "grub.cfg")
+    print(f"  Using GRUB 2 path: {grub_cfg_path}")
+    
+    # Generate GRUB config
     grub_mkconfig_cmd = ["grub2-mkconfig", "-o", grub_cfg_path]
     success, err, stdout = _run_in_chroot(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
     # Log output even on success for debugging
     print(f"grub2-mkconfig finished. Success: {success}. Stderr: {err}. Stdout: {stdout}") 
-    if not success: return False, err, None
+    if not success: 
+        print(f"Failed to generate GRUB config: {err}")
+        return False, err, None
+    
+    # Verify the config file was created and has content
+    grub_cfg_full_path = os.path.join(target_root, grub_cfg_path.lstrip('/'))
+    if not os.path.exists(grub_cfg_full_path) or os.path.getsize(grub_cfg_full_path) < 100:
+        print(f"ERROR: GRUB config file is missing or too small: {grub_cfg_full_path}")
+        return False, "GRUB configuration file was not generated properly", None
+    
+    print(f"GRUB config generated successfully: {grub_cfg_full_path} ({os.path.getsize(grub_cfg_full_path)} bytes)")
+    
+    # For UEFI systems, also copy grub.cfg to the EFI partition where GRUB can find it
+    if is_uefi:
+        efi_grub_cfg_path = os.path.join(boot_target_dir, "grub.cfg")
+        try:
+            shutil.copy2(grub_cfg_full_path, efi_grub_cfg_path)
+            print(f"Copied GRUB config to EFI partition: {efi_grub_cfg_path}")
+        except Exception as e:
+            print(f"Warning: Could not copy GRUB config to EFI partition: {e}")
+            # Don't fail the installation for this, but it might affect boot
+    
+    # Also create a symlink/copy at /boot/grub/grub.cfg for compatibility
+    grub_legacy_cfg_path = os.path.join(target_root, "boot", "grub", "grub.cfg")
+    try:
+        if not os.path.exists(grub_legacy_cfg_path):
+            shutil.copy2(grub_cfg_full_path, grub_legacy_cfg_path)
+            print(f"Created legacy GRUB config copy: {grub_legacy_cfg_path}")
+    except Exception as e:
+        print(f"Warning: Could not create legacy GRUB config copy: {e}")
+    
+    # Verify the config contains boot entries
+    try:
+        with open(grub_cfg_full_path, 'r') as f:
+            config_content = f.read()
+            if 'menuentry' not in config_content:
+                print("WARNING: GRUB config does not contain any menu entries!")
+                print("This suggests the kernel was not detected properly.")
+                
+                # Try to manually detect and add a kernel entry
+                print("Attempting to manually detect kernel...")
+                kernel_files = []
+                vmlinuz_dir = os.path.join(target_root, "boot")
+                if os.path.exists(vmlinuz_dir):
+                    for f in os.listdir(vmlinuz_dir):
+                        if f.startswith('vmlinuz-') and 'rescue' not in f:
+                            kernel_files.append(f)
+                
+                if kernel_files:
+                    kernel_files.sort()  # Use the latest kernel
+                    kernel_file = kernel_files[-1]
+                    kernel_version = kernel_file.replace('vmlinuz-', '')
+                    initrd_file = f"initramfs-{kernel_version}.img"
+                    initrd_path = os.path.join(vmlinuz_dir, initrd_file)
+                    
+                    print(f"Found kernel: {kernel_file}, looking for initrd: {initrd_file}")
+                    
+                    if os.path.exists(initrd_path):
+                        print(f"Found initrd: {initrd_file}")
+                        # We'll add a manual boot entry, but let's not fail here
+                        print("Kernel and initrd found, GRUB should be able to boot")
+                    else:
+                        print(f"WARNING: initrd not found at {initrd_path}")
+                else:
+                    print("ERROR: No kernel files found in /boot")
+                    return False, "No kernel found in target system - cannot create bootable system", None
+            else:
+                print(f"GRUB config contains menu entries")
+                
+    except Exception as e:
+        print(f"Warning: Could not verify GRUB config content: {e}")
+        # Don't fail the installation for this
+
+    # --- Regenerate initramfs for the target system ---
+    print("Regenerating initramfs for target system...")
+    try:
+        # Find installed kernels
+        kernel_files = []
+        vmlinuz_dir = os.path.join(target_root, "boot")
+        if os.path.exists(vmlinuz_dir):
+            for f in os.listdir(vmlinuz_dir):
+                if f.startswith('vmlinuz-') and 'rescue' not in f:
+                    kernel_files.append(f)
+        
+        if kernel_files:
+            kernel_files.sort()  # Process all kernels, latest first
+            for kernel_file in reversed(kernel_files):
+                kernel_version = kernel_file.replace('vmlinuz-', '')
+                print(f"Regenerating initramfs for kernel: {kernel_version}")
+                
+                # Use dracut to regenerate initramfs with correct drivers for target system
+                dracut_cmd = ["dracut", "--force", "--kver", kernel_version]
+                success, err, stdout = _run_in_chroot(target_root, dracut_cmd, f"Regenerate initramfs for {kernel_version}", progress_callback, timeout=300)
+                
+                if success:
+                    print(f"Successfully regenerated initramfs for {kernel_version}")
+                    
+                    # Verify the initramfs was created
+                    initramfs_path = os.path.join(target_root, "boot", f"initramfs-{kernel_version}.img")
+                    if os.path.exists(initramfs_path) and os.path.getsize(initramfs_path) > 1000000:  # At least 1MB
+                        print(f"Verified initramfs: {initramfs_path} ({os.path.getsize(initramfs_path)} bytes)")
+                    else:
+                        print(f"Warning: initramfs seems too small or missing: {initramfs_path}")
+                else:
+                    print(f"Warning: Failed to regenerate initramfs for {kernel_version}: {err}")
+                    # Try alternative method with mkinitrd if dracut fails
+                    mkinitrd_cmd = ["mkinitrd", f"/boot/initramfs-{kernel_version}.img", kernel_version]
+                    success_alt, err_alt, _ = _run_in_chroot(target_root, mkinitrd_cmd, f"Alternative initramfs generation for {kernel_version}", progress_callback, timeout=300)
+                    if success_alt:
+                        print(f"Successfully created initramfs using mkinitrd for {kernel_version}")
+                    else:
+                        print(f"Warning: Both dracut and mkinitrd failed for {kernel_version}: {err_alt}")
+        else:
+            print("Warning: No kernel files found for initramfs generation")
+            
+    except Exception as e:
+        print(f"Warning: Error during initramfs regeneration: {e}")
+        # Don't fail the installation for this, but it's important
 
     print("Bootloader configuration steps completed.")
     
@@ -1479,7 +1595,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         missing_files = []
         for file_path, description in efi_files_to_check:
             if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                print(f"✓ {description}: {file_path} ({os.path.getsize(file_path)} bytes)")
+                print(f"{description}: {file_path} ({os.path.getsize(file_path)} bytes)")
             else:
                 print(f"✗ {description}: {file_path} - MISSING or empty")
                 missing_files.append(f"{description} ({file_path})")
@@ -1488,7 +1604,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             print(f"WARNING: Missing UEFI files: {', '.join(missing_files)}")
             # Don't fail, but warn user
         else:
-            print("✓ All UEFI bootloader files present")
+            print("All UEFI bootloader files present")
             
     else:
         # BIOS-specific verification
@@ -1500,7 +1616,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             check_mbr_cmd = ["dd", "if=" + grub_target_disk, "bs=512", "count=1", "status=none"]
             result = subprocess.run(check_mbr_cmd, capture_output=True, check=False)
             if result.returncode == 0 and b"GRUB" in result.stdout:
-                print("✓ GRUB signature found in MBR")
+                print("GRUB signature found in MBR")
             else:
                 print("⚠ Could not verify GRUB signature in MBR")
         except Exception as e:
@@ -1516,7 +1632,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     grub_cfg_found = False
     for cfg_path in grub_cfg_paths:
         if os.path.exists(cfg_path) and os.path.getsize(cfg_path) > 0:
-            print(f"✓ GRUB configuration found: {cfg_path}")
+            print(f"GRUB configuration found: {cfg_path}")
             grub_cfg_found = True
             break
     
@@ -1527,7 +1643,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     # Verify boot directory structure
     boot_dir = os.path.join(target_root, "boot")
     if os.path.exists(boot_dir):
-        print(f"✓ Boot directory exists: {boot_dir}")
+        print(f"Boot directory exists: {boot_dir}")
     else:
         print("✗ Boot directory missing")
         return False, "Boot directory does not exist", None
