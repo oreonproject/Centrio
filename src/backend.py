@@ -1532,7 +1532,6 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     print(f"Generating GRUB configuration file (grub.cfg) for {bootloader_id}...")
     
     # Determine correct grub config path (/boot/grub2/ or /boot/grub/)
-    grub_cfg_path = None
     grub2_dir_in_chroot = "/boot/grub2"
     grub_dir_in_chroot = "/boot/grub"
     
@@ -1548,8 +1547,15 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         print(f"Warning: Could not create GRUB directories: {e}")
     
     # Use /boot/grub2 as primary path (modern systems)
-        grub_cfg_path = os.path.join(grub2_dir_in_chroot, "grub.cfg")
-        print(f"  Using GRUB 2 path: {grub_cfg_path}")
+    grub_cfg_path = os.path.join(grub2_dir_in_chroot, "grub.cfg")
+    print(f"Using GRUB 2 path: {grub_cfg_path}")
+    
+    # Validate grub_cfg_path before using it
+    if not grub_cfg_path or grub_cfg_path == "None":
+        print("ERROR: grub_cfg_path is invalid, falling back to default")
+        grub_cfg_path = "/boot/grub2/grub.cfg"
+    
+    print(f"Final GRUB config path: {grub_cfg_path}")
     
     # Generate GRUB config
     grub_mkconfig_cmd = ["grub2-mkconfig", "-o", grub_cfg_path]
@@ -1561,6 +1567,10 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         return False, err, None
     
     # Verify the config file was created and has content
+    if not grub_cfg_path:
+        print("ERROR: grub_cfg_path is None after generation")
+        return False, "GRUB configuration path is invalid", None
+    
     grub_cfg_full_path = os.path.join(target_root, grub_cfg_path.lstrip('/'))
     if not os.path.exists(grub_cfg_full_path) or os.path.getsize(grub_cfg_full_path) < 100:
         print(f"ERROR: GRUB config file is missing or too small: {grub_cfg_full_path}")
@@ -1569,7 +1579,7 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     print(f"GRUB config generated successfully: {grub_cfg_full_path} ({os.path.getsize(grub_cfg_full_path)} bytes)")
     
     # For UEFI systems, also copy grub.cfg to the EFI partition where GRUB can find it
-    if is_uefi:
+    if is_uefi and 'boot_target_dir' in locals():
         efi_grub_cfg_path = os.path.join(boot_target_dir, "grub.cfg")
         try:
             shutil.copy2(grub_cfg_full_path, efi_grub_cfg_path)
@@ -1577,6 +1587,8 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
         except Exception as e:
             print(f"Warning: Could not copy GRUB config to EFI partition: {e}")
             # Don't fail the installation for this, but it might affect boot
+    elif is_uefi:
+        print("Warning: boot_target_dir not defined, cannot copy GRUB config to EFI partition")
     
     # Also create a symlink/copy at /boot/grub/grub.cfg for compatibility
     grub_legacy_cfg_path = os.path.join(target_root, "boot", "grub", "grub.cfg")
@@ -2083,3 +2095,7 @@ def verify_grub_packages(target_root):
                 
         except Exception as e:
             return False, f"Missing required GRUB packages: {', '.join(missing_packages)}. Could not install: {e}", None
+    
+    # If we reach here, all packages are verified or successfully installed
+    print("All required GRUB packages are verified/installed")
+    return True, "", None
