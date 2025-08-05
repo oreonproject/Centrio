@@ -16,23 +16,35 @@ class UserPage(BaseConfigurationPage):
         # Removed D-Bus proxy variable
         
         # --- Create UI Elements FIRST ---
+        # User details section
         details_group = Adw.PreferencesGroup(title="User Details")
+        details_group.set_description("Configure the primary user account")
         self.add(details_group)
+        
+        # Password section
+        password_group = Adw.PreferencesGroup(title="Password")
+        password_group.set_description("Set a secure password for the user account")
+        self.add(password_group)
+        
+        # Admin privileges section
+        admin_group = Adw.PreferencesGroup(title="Administrative Privileges")
+        admin_group.set_description("Configure user administrative access")
+        self.add(admin_group)
+        
+        # Button section
+        button_group = Adw.PreferencesGroup()
+        self.add(button_group)
         self.real_name_row = Adw.EntryRow(title="Full Name")
         details_group.add(self.real_name_row)
         self.username_row = Adw.EntryRow(title="Username (lowercase, alphanumeric, max 32 chars)")
         details_group.add(self.username_row)
         
-        password_group = Adw.PreferencesGroup(title="Password")
-        self.add(password_group)
         self.password_row = Adw.PasswordEntryRow(title="Password")
         password_group.add(self.password_row)
         self.confirm_password_row = Adw.PasswordEntryRow(title="Confirm Password")
         password_group.add(self.confirm_password_row)
         
         # Add admin checkbox (optional)
-        admin_group = Adw.PreferencesGroup(title="Administrator Privileges")
-        self.add(admin_group)
         self.admin_check = Gtk.CheckButton(label="Make this user an administrator")
         self.admin_check.set_tooltip_text("Adds the user to the 'wheel' group for sudo access")
         self.admin_check.set_active(True) # Default to admin
@@ -42,8 +54,6 @@ class UserPage(BaseConfigurationPage):
         admin_box.append(self.admin_check)
         admin_group.add(admin_box)
         
-        button_group = Adw.PreferencesGroup()
-        self.add(button_group)
         self.complete_button = Gtk.Button(label="Create User Account") 
         self.complete_button.set_halign(Gtk.Align.CENTER)
         self.complete_button.set_margin_top(24)

@@ -20,8 +20,8 @@ class BaseConfigurationPage(Adw.PreferencesPage):
         if subtitle:
             self.set_description(subtitle)
             
-        # Fix scrolling conflicts with main window
-        self.set_vexpand(False)
+        # Control expansion to prevent window from being too tall
+        self.set_vexpand(False)  # Don't expand vertically
         self.set_hexpand(True)
 
     def show_toast(self, message, timeout=3):

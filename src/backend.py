@@ -2099,3 +2099,390 @@ def verify_grub_packages(target_root):
     # If we reach here, all packages are verified or successfully installed
     print("All required GRUB packages are verified/installed")
     return True, "", None
+
+# --- Live Environment Copy Functions ---
+
+def copy_live_environment(target_root, progress_callback=None):
+    """Copies the entire live environment to the target disk.
+    
+    This is much faster than installing packages and ensures the target system
+    has exactly the same software as the live environment.
+    """
+    
+    # --- Root Check --- 
+    if os.geteuid() != 0:
+        err = "copy_live_environment must be run as root."
+        print(f"ERROR: {err}")
+        return False, err
+    
+    print("Starting live environment copy...")
+    
+    if progress_callback:
+        progress_callback("Preparing to copy live environment...", 0.0)
+    
+    # Define directories to copy (exclude system-specific directories)
+    copy_directories = [
+        "/bin",
+        "/boot", 
+        "/dev",  # Will be recreated by system
+        "/etc",
+        "/home",
+        "/lib",
+        "/lib64",
+        "/media",
+        "/mnt",
+        "/opt",
+        "/proc",  # Will be recreated by system
+        "/root",
+        "/run",   # Will be recreated by system
+        "/sbin",
+        "/srv",
+        "/sys",   # Will be recreated by system
+        "/tmp",   # Will be recreated by system
+        "/usr",
+        "/var"
+    ]
+    
+    # Directories to exclude from copying (system-specific)
+    exclude_directories = [
+        "/dev",
+        "/proc", 
+        "/run",
+        "/sys",
+        "/tmp"
+    ]
+    
+    # Files to exclude
+    exclude_files = [
+        "/etc/fstab",  # Will be regenerated
+        "/etc/mtab",   # Will be regenerated
+        "/etc/resolv.conf",  # Will be copied separately
+        "/etc/hosts",  # Will be regenerated
+        "/etc/hostname",  # Will be set by configuration
+        "/etc/machine-id",  # Will be regenerated
+        "/etc/adjtime",  # Will be regenerated
+        "/var/lib/dbus/machine-id",  # Will be regenerated
+        "/var/lib/systemd/random-seed",  # Will be regenerated
+        "/var/log/*",  # Clear logs
+        "/var/cache/*",  # Clear cache
+        "/var/tmp/*",  # Clear temp
+        "/tmp/*"  # Clear temp
+    ]
+    
+    # Build rsync exclude list
+    exclude_args = []
+    for exclude in exclude_directories + exclude_files:
+        exclude_args.extend(["--exclude", exclude])
+    
+    # Add additional rsync options for better performance and safety
+    rsync_options = [
+        "rsync",
+        "-a",  # Archive mode (preserves permissions, timestamps, etc.)
+        "-H",  # Preserve hard links
+        "-A",  # Preserve ACLs
+        "-X",  # Preserve extended attributes
+        "--numeric-ids",  # Preserve user/group IDs
+        "--one-file-system",  # Don't cross filesystem boundaries
+        "--delete",  # Remove files in destination that don't exist in source
+        "--force",  # Force deletion of directories even if not empty
+        "--ignore-errors",  # Skip files that can't be transferred
+        "--progress",  # Show progress
+        "--stats"  # Show transfer statistics
+    ]
+    
+    # Add exclude arguments
+    rsync_options.extend(exclude_args)
+    
+    # Source and destination
+    source = "/"
+    destination = target_root.rstrip('/') + "/"
+    
+    # Build final command
+    rsync_cmd = rsync_options + [source, destination]
+    
+    print(f"Executing rsync command: {' '.join(shlex.quote(c) for c in rsync_cmd[:10])}...")
+    
+    if progress_callback:
+        progress_callback("Copying live environment to target disk...", 0.1)
+    
+    # Execute rsync with progress tracking
+    process = None
+    stderr_output = ""
+    try:
+        process = subprocess.Popen(
+            rsync_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+        
+        # Progress tracking patterns
+        progress_re = re.compile(r"^\s*(\d+,\d+)\s+(\d+%)\s+(\d+\.\d+[KMG]B/s)\s+(\d+:\d+:\d+)\s+")
+        
+        last_fraction = 0.1
+        last_progress = ""
+        
+        # Read stderr for progress (rsync sends progress to stderr)
+        if process.stderr is not None:
+            for line in iter(process.stderr.readline, ''):
+                line_strip = line.strip()
+                if not line_strip:
+                    continue
+                
+                # Parse progress information
+                match = progress_re.search(line_strip)
+                if match:
+                    transferred, percent, speed, eta = match.groups()
+                    # Convert percentage to fraction (0.1 to 0.9 range)
+                    try:
+                        percent_num = int(percent.rstrip('%'))
+                        fraction = 0.1 + (percent_num / 100.0) * 0.8
+                        message = f"Copying live environment: {percent} complete ({speed})"
+                        
+                        if progress_callback:
+                            progress_callback(message, fraction)
+                        
+                        last_fraction = fraction
+                        last_progress = line_strip
+                    except ValueError:
+                        pass
+                else:
+                    # Log non-progress lines
+                    if "error" in line_strip.lower() or "failed" in line_strip.lower():
+                        print(f"rsync warning: {line_strip}")
+                
+                # Check if process exited
+                if process.poll() is not None:
+                    print("rsync process completed while reading output.")
+                    break
+        else:
+            raise RuntimeError("process.stderr is None; cannot read rsync progress")
+        
+        # Wait for process completion
+        process.stderr.close()
+        return_code = process.wait(timeout=3600)  # 1 hour timeout
+        
+        # Read stdout for final statistics
+        if process.stdout:
+            stdout_output = process.stdout.read()
+            process.stdout.close()
+        
+        if return_code != 0:
+            stderr_text = stderr_output.strip() if stderr_output else ""
+            error_msg = f"rsync copy failed (rc={return_code}). Stderr:\n{stderr_text}"
+            print(f"ERROR: {error_msg}")
+            if progress_callback:
+                progress_callback(error_msg, last_fraction)
+            return False, error_msg
+        else:
+            print("SUCCESS: Live environment copy completed.")
+            if progress_callback:
+                progress_callback("Live environment copy complete.", 0.9)
+            return True, ""
+            
+    except FileNotFoundError:
+        err = "Command not found: rsync. Cannot copy live environment."
+        print(f"ERROR: {err}")
+        if progress_callback:
+            progress_callback(err, 0.0)
+        return False, err
+    except subprocess.TimeoutExpired:
+        err = "Timeout expired during rsync copy (1 hour)."
+        print(f"ERROR: {err}")
+        if process:
+            process.kill()
+        if progress_callback:
+            progress_callback(err, last_fraction)
+        return False, err
+    except Exception as e:
+        err = f"Unexpected error during rsync copy: {e}\nStderr: {stderr_output}"
+        print(f"ERROR: {err}")
+        if process:
+            process.kill()
+        if progress_callback:
+            progress_callback(err, last_fraction)
+        return False, err
+    finally:
+        if process:
+            if process.stdout and not process.stdout.closed:
+                process.stdout.close()
+            if process.stderr and not process.stderr.closed:
+                process.stderr.close()
+
+def setup_live_environment_post_copy(target_root, progress_callback=None):
+    """Sets up the copied live environment for booting from the target disk.
+    
+    This function handles the post-copy setup tasks like:
+    - Regenerating system-specific files
+    - Setting up bootloader
+    - Configuring network
+    - Setting up users
+    """
+    
+    print("Setting up live environment for target disk...")
+    
+    if progress_callback:
+        progress_callback("Setting up target system...", 0.9)
+    
+    # --- Regenerate system-specific files ---
+    print("Regenerating system-specific files...")
+    
+    # Generate new machine-id
+    machine_id_path = os.path.join(target_root, "etc/machine-id")
+    try:
+        if os.path.exists(machine_id_path):
+            os.remove(machine_id_path)
+        # systemd will generate a new machine-id on first boot
+        print("Removed old machine-id (will be regenerated on first boot)")
+    except Exception as e:
+        print(f"Warning: Could not remove machine-id: {e}")
+    
+    # Generate new dbus machine-id
+    dbus_machine_id_path = os.path.join(target_root, "var/lib/dbus/machine-id")
+    try:
+        if os.path.exists(dbus_machine_id_path):
+            os.remove(dbus_machine_id_path)
+        # dbus will generate a new machine-id on first boot
+        print("Removed old dbus machine-id (will be regenerated on first boot)")
+    except Exception as e:
+        print(f"Warning: Could not remove dbus machine-id: {e}")
+    
+    # Clear systemd random seed
+    random_seed_path = os.path.join(target_root, "var/lib/systemd/random-seed")
+    try:
+        if os.path.exists(random_seed_path):
+            os.remove(random_seed_path)
+        print("Removed old random seed (will be regenerated on first boot)")
+    except Exception as e:
+        print(f"Warning: Could not remove random seed: {e}")
+    
+    # Clear logs
+    log_dirs = [
+        os.path.join(target_root, "var/log"),
+        os.path.join(target_root, "var/cache"),
+        os.path.join(target_root, "var/tmp"),
+        os.path.join(target_root, "tmp")
+    ]
+    
+    for log_dir in log_dirs:
+        try:
+            if os.path.exists(log_dir):
+                # Remove contents but keep directory
+                for item in os.listdir(log_dir):
+                    item_path = os.path.join(log_dir, item)
+                    try:
+                        if os.path.isfile(item_path):
+                            os.remove(item_path)
+                        elif os.path.isdir(item_path):
+                            shutil.rmtree(item_path)
+                    except Exception as e:
+                        print(f"Warning: Could not remove {item_path}: {e}")
+                print(f"Cleared {log_dir}")
+        except Exception as e:
+            print(f"Warning: Could not clear {log_dir}: {e}")
+    
+    # --- Copy essential files from host ---
+    print("Copying essential files from host...")
+    
+    # Copy resolv.conf
+    host_resolv = "/etc/resolv.conf"
+    target_resolv = os.path.join(target_root, "etc/resolv.conf")
+    try:
+        if os.path.exists(host_resolv):
+            shutil.copy2(host_resolv, target_resolv)
+            print("Copied resolv.conf from host")
+    except Exception as e:
+        print(f"Warning: Could not copy resolv.conf: {e}")
+    
+    # --- Ensure essential directories exist ---
+    essential_dirs = [
+        os.path.join(target_root, "proc"),
+        os.path.join(target_root, "sys"),
+        os.path.join(target_root, "dev"),
+        os.path.join(target_root, "run"),
+        os.path.join(target_root, "tmp")
+    ]
+    
+    for dir_path in essential_dirs:
+        try:
+            os.makedirs(dir_path, exist_ok=True)
+        except Exception as e:
+            print(f"Warning: Could not create {dir_path}: {e}")
+    
+    print("Live environment setup complete.")
+    if progress_callback:
+        progress_callback("Live environment setup complete.", 1.0)
+    
+    return True, ""
+
+def install_packages_on_live_copy(target_root, package_config, progress_callback=None):
+    """Installs additional packages on top of the copied live environment.
+    
+    This function is similar to install_packages_enhanced but optimized for
+    a live environment copy where the base system is already present.
+    """
+    
+    # --- Root Check --- 
+    if os.geteuid() != 0:
+        err = "install_packages_on_live_copy must be run as root."
+        print(f"ERROR: {err}")
+        return False, err
+    
+    print("Installing additional packages on live environment copy...")
+    
+    # Get configuration
+    packages = package_config.get("packages", [])
+    repositories = package_config.get("repositories", [])
+    flatpak_enabled = package_config.get("flatpak_enabled", False)
+    flatpak_packages = package_config.get("flatpak_packages", [])
+    
+    print(f"Additional packages to install: {len(packages)}")
+    print(f"Additional repositories: {len(repositories)}")
+    print(f"Flatpak enabled: {flatpak_enabled}")
+    print(f"Flatpak packages to install: {len(flatpak_packages)}")
+    
+    # --- Setup Additional Repositories First ---
+    if repositories:
+        if progress_callback:
+            progress_callback("Setting up additional repositories...", 0.1)
+        success, err = setup_repositories(target_root, repositories, progress_callback)
+        if not success:
+            print(f"Warning: Some repositories failed to setup: {err}")
+            # Continue anyway, as base system is already present
+    
+    # --- Install Additional Packages ---
+    if packages:
+        if progress_callback:
+            progress_callback("Installing additional packages...", 0.2)
+        
+        # Use DNF to install additional packages (not the full system)
+        success, err = _install_packages_dnf_impl(target_root, packages, progress_callback, keep_cache=True)
+        if not success:
+            return False, err
+    
+    # --- Setup Flatpak if enabled ---
+    if flatpak_enabled:
+        if progress_callback:
+            progress_callback("Setting up Flatpak...", 0.85)
+        
+        success, err = setup_flatpak(target_root, progress_callback)
+        if not success:
+            print(f"Warning: Flatpak setup failed: {err}")
+            # Don't fail the entire installation for Flatpak issues
+        
+        # --- Install Flatpak packages ---
+        if flatpak_packages:
+            if progress_callback:
+                progress_callback("Installing Flatpak applications...", 0.9)
+            
+            success, err = install_flatpak_packages(target_root, flatpak_packages, progress_callback)
+            if not success:
+                print(f"Warning: Some Flatpak packages failed to install: {err}")
+                # Don't fail the entire installation for Flatpak package issues
+    
+    if progress_callback:
+        progress_callback("Additional package installation complete.", 1.0)
+    
+    print("Additional package installation completed successfully.")
+    return True, ""

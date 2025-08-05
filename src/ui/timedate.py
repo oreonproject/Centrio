@@ -25,24 +25,29 @@ class TimeDatePage(BaseConfigurationPage):
         self.timezone_list = ana_get_all_regions_and_timezones()
         # If pytz isn't available, the list might be very short
 
-        # --- Add Widgets using self.add() --- 
+        # --- Add Widgets using self.add() ---
+        
         time_group = Adw.PreferencesGroup()
+        
         self.add(time_group)
         
-        tz_model = Gtk.StringList.new(self.timezone_list)
-        self.timezone_row = Adw.ComboRow(title="Timezone", model=tz_model)
+        # Use ComboRow for timezone selection
+        timezone_model = Gtk.StringList.new(self.timezone_list)
+        self.timezone_row = Adw.ComboRow(title="Timezone", model=timezone_model)
         time_group.add(self.timezone_row)
         
-        # Network Time Switch
-        self.network_time_row = Adw.SwitchRow(
-            title="Network Time",
-            subtitle="Automatically synchronize time from the network (Requires NTP service)"
+        # NTP toggle
+        self.ntp_row = Adw.SwitchRow(
+            title="Enable Network Time Protocol (NTP)",
+            subtitle="Automatically synchronize system time with network servers"
         )
-        time_group.add(self.network_time_row)
+        self.ntp_row.set_active(self.current_ntp)
+        self.ntp_row.connect("notify::active", self.on_ntp_toggled)
+        time_group.add(self.ntp_row)
         
         # --- Confirmation Button --- 
         button_group = Adw.PreferencesGroup()
-        self.add(button_group) 
+        self.add(button_group)
         self.complete_button = Gtk.Button(label="Apply Time & Date Settings")
         self.complete_button.set_halign(Gtk.Align.CENTER)
         self.complete_button.set_margin_top(24)
@@ -51,13 +56,18 @@ class TimeDatePage(BaseConfigurationPage):
         # Enable based on whether timezones could be listed
         self.complete_button.set_sensitive(bool(self.timezone_list))
         self.timezone_row.set_sensitive(bool(self.timezone_list))
-        self.network_time_row.set_sensitive(True) # Assume NTP can always be toggled
+        self.ntp_row.set_sensitive(True) # Assume NTP can always be toggled
         if not self.timezone_list:
              self.timezone_row.set_subtitle("Failed to load timezones")
         button_group.add(self.complete_button)
 
         # --- Fetch Current Settings --- 
         self.connect_and_fetch_data()
+
+    def on_ntp_toggled(self, switch_row, pspec):
+        """Handle NTP toggle changes."""
+        self.current_ntp = switch_row.get_active()
+        print(f"NTP toggled to: {self.current_ntp}")
 
     def connect_and_fetch_data(self):
         """Fetches current timezone and NTP status using timedatectl."""
@@ -105,18 +115,18 @@ class TimeDatePage(BaseConfigurationPage):
                 self.timezone_row.set_selected(0) # Default to first if fetch failed/not found
                 
             # Set NTP Switch
-            self.network_time_row.set_active(self.current_ntp)
+            self.ntp_row.set_active(self.current_ntp)
             
             # Ensure widgets are sensitive
             self.timezone_row.set_sensitive(bool(self.timezone_list))
-            self.network_time_row.set_sensitive(True)
+            self.ntp_row.set_sensitive(True)
             self.complete_button.set_sensitive(bool(self.timezone_list))
 
         except FileNotFoundError:
             print("ERROR: timedatectl command not found.")
             self.show_toast("Error: timedatectl command not found. Cannot get/set time settings.")
             self.timezone_row.set_sensitive(False)
-            self.network_time_row.set_sensitive(False)
+            self.ntp_row.set_sensitive(False)
             self.complete_button.set_sensitive(False)
         except subprocess.CalledProcessError as e:
             print(f"ERROR: timedatectl status failed: {e}\n{e.stderr}")
@@ -137,7 +147,7 @@ class TimeDatePage(BaseConfigurationPage):
              return
              
         selected_tz = self.timezone_list[selected_idx]
-        network_time_enabled = self.network_time_row.get_active()
+        network_time_enabled = self.ntp_row.get_active()
         ntp_bool_str = "true" if network_time_enabled else "false"
 
         print(f"Attempting to set Timezone='{selected_tz}', NTP={ntp_bool_str} using timedatectl...")

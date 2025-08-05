@@ -20,7 +20,7 @@ from ui.keyboard import KeyboardPage
 from ui.language import LanguagePage
 from ui.timedate import TimeDatePage
 from ui.disk import DiskPage
-from ui.network import NetworkPage
+from ui.network import NetworkConnectivityPage
 from ui.user import UserPage
 from ui.payload import PayloadPage
 from ui.bootloader import BootloaderPage
@@ -37,8 +37,8 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
         self.final_config = {} # Stores final selected values passed back from ui
 
         self.set_title("Centrio Installer")
-        self.set_default_size(700, 700)  # Smaller default size for better screen fit
-        self.set_resizable(True)  # Allow window resizing
+        self.set_default_size(700, 350)  # Much smaller default height
+        self.set_resizable(True)
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_content(main_box)
         
@@ -47,17 +47,9 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
         self.toast_overlay.set_vexpand(True)
         main_box.append(self.toast_overlay)
 
-        # --- Scrolled Window for content --- 
-        scrolled_window = Gtk.ScrolledWindow()
-        scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scrolled_window.set_vexpand(True)
-        scrolled_window.set_hexpand(True)
-        scrolled_window.set_propagate_natural_height(True)
-        self.toast_overlay.set_child(scrolled_window)
-
-        # --- View Stack (inside the scrolled window) --- 
+        # --- View Stack (directly in the overlay) --- 
         self.view_stack = Adw.ViewStack()
-        scrolled_window.set_child(self.view_stack)
+        self.toast_overlay.set_child(self.view_stack)
 
         # --- Add ui to the stack ---
         # Main flow ui
@@ -87,7 +79,7 @@ class CentrioInstallerWindow(Adw.ApplicationWindow):
         self.disk_page = DiskPage(main_window=self, overlay_widget=self.toast_overlay)
         self.view_stack.add_titled(self.disk_page, "disk", "Disk Settings")
         
-        self.network_page = NetworkPage(main_window=self, overlay_widget=self.toast_overlay)
+        self.network_page = NetworkConnectivityPage(main_window=self, overlay_widget=self.toast_overlay)
         self.view_stack.add_titled(self.network_page, "network", "Network Settings")
         
         self.user_page = UserPage(main_window=self, overlay_widget=self.toast_overlay)

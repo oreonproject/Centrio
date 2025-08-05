@@ -19,8 +19,8 @@ class ProgressPage(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18, **kwargs)
         # Remove nested ScrolledWindow to prevent conflicts with main window scrolling
         self.set_vexpand(True)
-        self.set_margin_top(36)
-        self.set_margin_bottom(36)
+        self.set_margin_top(24)  # Reduced from 36
+        self.set_margin_bottom(24)  # Reduced from 36
         self.set_margin_start(48)
         self.set_margin_end(48)
         self.set_valign(Gtk.Align.CENTER)
@@ -679,6 +679,86 @@ class ProgressPage(Gtk.Box):
 
         return success
 
+    def _copy_live_environment(self, config_data):
+        """Copies the entire live environment to the target disk instead of installing packages."""
+        if self.stop_requested: return False, "Stop requested"
+        
+        payload_config = config_data.get('payload', {})
+        network_config = config_data.get('network', {})
+        
+        print("Using live environment copy method...")
+        self._update_progress_text("Starting live environment copy (This is much faster than package installation)...", 0.35)
+        
+        # Step 1: Copy the live environment
+        success, err = backend.copy_live_environment(
+            self.target_root,
+            progress_callback=self._update_progress_text
+        )
+        
+        if not success:
+            self.installation_error = err
+            return False
+        
+        # Step 2: Setup the copied environment
+        self._update_progress_text("Setting up copied environment...", 0.75)
+        success, err = backend.setup_live_environment_post_copy(
+            self.target_root,
+            progress_callback=self._update_progress_text
+        )
+        
+        if not success:
+            self.installation_error = err
+            return False
+        
+        # Step 3: Check network configuration and install additional packages if enabled
+        network_enabled = network_config.get('network_enabled', False)
+        skip_network = network_config.get('skip_network', False)
+        
+        if skip_network:
+            self._update_progress_text("Network configuration skipped - only base system installed.", 0.85)
+            print("Network configuration skipped - no additional packages will be installed")
+            return True
+        
+        if not network_enabled:
+            self._update_progress_text("Network disabled - only base system installed.", 0.85)
+            print("Network disabled - no additional packages will be installed")
+            return True
+        
+        # Network is enabled, proceed with additional packages
+        packages = payload_config.get('packages', [])
+        repositories = payload_config.get('repositories', [])
+        flatpak_enabled = payload_config.get('flatpak_enabled', False)
+        flatpak_packages = payload_config.get('flatpak_packages', [])
+        
+        if packages or repositories or flatpak_enabled:
+            self._update_progress_text("Installing additional packages on live environment...", 0.8)
+            
+            # Build package configuration for additional packages
+            package_config = {
+                "packages": packages,
+                "repositories": repositories,
+                "flatpak_enabled": flatpak_enabled,
+                "flatpak_packages": flatpak_packages,
+                "minimal_install": False,
+                "keep_cache": True
+            }
+            
+            success, err = backend.install_packages_on_live_copy(
+                self.target_root,
+                package_config,
+                progress_callback=self._update_progress_text
+            )
+            
+            if not success:
+                self.installation_error = err
+                return False
+        else:
+            self._update_progress_text("No additional packages selected - base system only.", 0.85)
+            print("No additional packages selected - base system only")
+        
+        self._update_progress_text("Live environment copy and setup complete.", 0.85)
+        return True
+
     def _install_packages(self, config_data):
         """Installs packages using enhanced backend function with full configuration support."""
         if self.stop_requested: return False, "Stop requested"
@@ -813,7 +893,7 @@ class ProgressPage(Gtk.Box):
         steps = [ 
              # Updated fractions slightly 
              (self._execute_storage_setup,      config_data.get('disk', {}), 0.00,  0.30), # 30%
-             (self._install_packages,           config_data,             0.30,  0.75), # 45%
+             (self._copy_live_environment,      config_data,             0.30,  0.75), # 45%
              (self._debug_find_shim,            config_data,             0.75,  0.75), # Debug step
              (self._configure_system,           config_data,             0.75,  0.80), # 5%
              (self._create_user,                config_data,             0.80,  0.85), # 5%
@@ -834,7 +914,7 @@ class ProgressPage(Gtk.Box):
                 step_success = func(data) 
                 
                 # --- Add explicit /etc check+create after package install ---
-                if func == self._install_packages and step_success:
+                if func == self._copy_live_environment and step_success:
                     etc_path = os.path.join(self.target_root, "etc")
                     resolv_conf_target = os.path.join(etc_path, "resolv.conf")
                     host_resolv_conf = "/etc/resolv.conf"

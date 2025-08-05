@@ -193,116 +193,39 @@ class DiskPage(BaseConfigurationPage):
     def _build_ui(self):
         """Build the enhanced disk configuration UI."""
         
-        # Initial scan section
-        info_group = Adw.PreferencesGroup()
+        # Info section
+        info_group = Adw.PreferencesGroup(title="Disk Information")
+        info_group.set_description("Select a disk to install Centrio on. This will erase all data on the selected disk.")
         self.add(info_group)
         
-        scan_row = Adw.ActionRow(
-            title="Storage Device Detection",
-            subtitle="Scan for available storage devices"
-        )
-        self.scan_button = Gtk.Button(label="Scan for Disks")
-        self.scan_button.set_valign(Gtk.Align.CENTER)
-        self.scan_button.add_css_class("suggested-action")
-        self.scan_button.connect("clicked", self.scan_for_disks)
-        scan_row.add_suffix(self.scan_button)
-        info_group.add(scan_row)
-
-        # Disk selection section
+        # Disk list section
         self.disk_list_group = Adw.PreferencesGroup(title="Available Disks")
-        self.disk_list_group.set_description("Select disk(s) for installation")
-        self.disk_list_group.set_visible(False)
+        self.disk_list_group.set_description("Select the target disk for installation")
         self.add(self.disk_list_group)
         
         # Installation mode section
         self.mode_group = Adw.PreferencesGroup(title="Installation Mode")
-        self.mode_group.set_visible(False)
+        self.mode_group.set_description("Choose how to handle the target disk")
         self.add(self.mode_group)
         
-        # Normal installation
-        self.normal_install_row = Adw.ActionRow(
-            title="Clean Installation",
-            subtitle="Erase disk and install Oreon (recommended)"
-        )
-        self.normal_radio = Gtk.CheckButton()
-        self.normal_radio.set_valign(Gtk.Align.CENTER)
-        self.normal_radio.connect("toggled", self.on_install_mode_changed, "normal")
-        self.normal_install_row.add_suffix(self.normal_radio)
-        self.normal_install_row.set_activatable_widget(self.normal_radio)
-        self.mode_group.add(self.normal_install_row)
-        
-        # Dual boot installation
-        self.dual_boot_row = Adw.ActionRow(
-            title="Dual Boot Installation",
-            subtitle="Install alongside existing operating system"
-        )
-        self.dual_boot_radio = Gtk.CheckButton(group=self.normal_radio)
-        self.dual_boot_radio.set_valign(Gtk.Align.CENTER)
-        self.dual_boot_radio.connect("toggled", self.on_install_mode_changed, "dual_boot")
-        self.dual_boot_row.add_suffix(self.dual_boot_radio)
-        self.dual_boot_row.set_activatable_widget(self.dual_boot_radio)
-        self.mode_group.add(self.dual_boot_row)
-        
-        # EFI partition selection (for dual boot)
-        self.efi_group = Adw.PreferencesGroup(title="EFI System Partition")
-        self.efi_group.set_description("Select existing EFI partition to preserve")
-        self.efi_group.set_visible(False)
+        # EFI section
+        self.efi_group = Adw.PreferencesGroup(title="Boot Configuration")
+        self.efi_group.set_description("Configure bootloader settings")
         self.add(self.efi_group)
         
-        # Filesystem selection section
+        # Filesystem section
         self.fs_group = Adw.PreferencesGroup(title="Filesystem Configuration")
-        self.fs_group.set_visible(False)
+        self.fs_group.set_description("Configure filesystem and partitioning")
         self.add(self.fs_group)
         
-        # Filesystem type selection
-        fs_row = Adw.ComboRow(title="Root Filesystem Type")
-        fs_row.set_subtitle("Choose the filesystem for the root partition")
-        fs_model = Gtk.StringList()
-        fs_model.append("ext4")
-        fs_model.append("btrfs (default)")
-        fs_model.append("xfs")
-        fs_row.set_model(fs_model)
-        fs_row.set_selected(1)  # Default to btrfs
-        fs_row.connect("notify::selected", self.on_filesystem_changed)
-        self.fs_group.add(fs_row)
-        
-        # Custom formatting toggle
-        self.custom_format_row = Adw.SwitchRow(
-            title="Custom Formatting Options",
-            subtitle="Enable advanced formatting and partition options"
-        )
-        self.custom_format_row.connect("notify::active", self.on_custom_format_toggled)
-        self.fs_group.add(self.custom_format_row)
-        
-        # Advanced options (shown when custom formatting is enabled)
+        # Advanced options section
         self.advanced_group = Adw.PreferencesGroup(title="Advanced Options")
-        self.advanced_group.set_visible(False)
+        self.advanced_group.set_description("Expert partitioning and installation options")
         self.add(self.advanced_group)
         
-        # EFI partition size (for custom formatting)
-        self.efi_size_row = Adw.SpinRow(
-            title="EFI Partition Size",
-            subtitle="Size in MB for the EFI system partition"
-        )
-        adjustment = Gtk.Adjustment(value=512, lower=100, upper=2048, step_increment=50)
-        self.efi_size_row.set_adjustment(adjustment)
-        self.advanced_group.add(self.efi_size_row)
-        
-        # Confirm button
+        # Button section
         self.button_group = Adw.PreferencesGroup()
         self.add(self.button_group)
-        
-        confirm_row = Adw.ActionRow(
-            title="Confirm Storage Configuration",
-            subtitle="Review and apply your storage settings"
-        )
-        self.complete_button = Gtk.Button(label="Apply Storage Plan")
-        self.complete_button.set_valign(Gtk.Align.CENTER)
-        self.complete_button.add_css_class("suggested-action")
-        self.complete_button.connect("clicked", self.apply_settings_and_return)
-        self.complete_button.set_sensitive(False)
-        confirm_row.add_suffix(self.complete_button)
-        self.button_group.add(confirm_row)
 
         # No _connect_dbus needed anymore
         # self._connect_dbus() 

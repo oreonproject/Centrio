@@ -44,7 +44,7 @@ class SummaryPage(Adw.PreferencesPage):
         )
         self.add(sys_group)
         self._add_config_row(sys_group, "timedate", "Time &amp; Date", "Timezone and time synchronization", True)
-        self._add_config_row(sys_group, "network", "Network &amp; Hostname", "Network configuration and system name", True)
+        self._add_config_row(sys_group, "network", "Network Connectivity", "Network configuration for additional software", True)
 
         # --- Storage Group ---
         storage_group = Adw.PreferencesGroup(

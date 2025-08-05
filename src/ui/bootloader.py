@@ -15,8 +15,20 @@ class BootloaderPage(BaseConfigurationPage):
         self.bootloader_enabled = True # Default to enabled
 
         # --- UI Elements ---
-        mode_group = Adw.PreferencesGroup()
+        # Boot mode section
+        mode_group = Adw.PreferencesGroup(title="Boot Mode")
+        mode_group.set_description("Select the boot mode for the system")
         self.add(mode_group)
+        
+        # Information section
+        info_group = Adw.PreferencesGroup(title="Boot Information")
+        info_group.set_description("Current boot configuration and requirements")
+        self.add(info_group)
+        
+        # Button section
+        button_group = Adw.PreferencesGroup()
+        self.add(button_group)
+
         self.enable_switch_row = Adw.SwitchRow(
             title="Install Bootloader",
             subtitle="A bootloader (GRUB2) will be installed by default"

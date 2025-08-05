@@ -75,7 +75,7 @@ class PayloadPage(BaseConfigurationPage):
     def __init__(self, main_window, overlay_widget, **kwargs):
         super().__init__(
             title="Software Selection", 
-            subtitle="Choose packages and configure software sources", 
+            subtitle="Choose additional software to install on the live environment", 
             main_window=main_window, 
             overlay_widget=overlay_widget, 
             **kwargs
@@ -94,12 +94,29 @@ class PayloadPage(BaseConfigurationPage):
     def _build_ui(self):
         """Build the enhanced package selection UI."""
         
-        # Package Groups Section
-        self.groups_section = Adw.PreferencesGroup(
-            title="Package Groups",
-            description="Select software categories to install"
+        # Installation Method Section
+        self.method_section = Adw.PreferencesGroup(
+            title="Installation Method",
+            description="The system will copy the live environment to disk and install additional software"
         )
-        self.add(self.groups_section)
+        self.add(self.method_section)
+        
+        # Live environment copy info
+        self.live_copy_info = Adw.ActionRow(
+            title="Live Environment Copy",
+            subtitle="Copy the entire live system to disk (fast and reliable)"
+        )
+        info_icon = Gtk.Image.new_from_icon_name("emblem-ok-symbolic")
+        info_icon.add_css_class("success")
+        self.live_copy_info.add_prefix(info_icon)
+        self.method_section.add(self.live_copy_info)
+        
+        # Additional Software Section
+        self.additional_section = Adw.PreferencesGroup(
+            title="Additional Software",
+            description="Select extra applications and packages to install"
+        )
+        self.add(self.additional_section)
         
         self._populate_package_groups()
         
@@ -155,14 +172,6 @@ class PayloadPage(BaseConfigurationPage):
         )
         self.add(self.advanced_section)
         
-        # Minimal installation toggle
-        self.minimal_row = Adw.SwitchRow(
-            title="Minimal Installation",
-            subtitle="Install only essential packages (overrides group selections)"
-        )
-        self.minimal_row.connect("notify::active", self.on_minimal_toggled)
-        self.advanced_section.add(self.minimal_row)
-        
         # Package cache option
         self.cache_row = Adw.SwitchRow(
             title="Keep Package Cache",
@@ -177,7 +186,7 @@ class PayloadPage(BaseConfigurationPage):
         
         confirm_row = Adw.ActionRow(
             title="Confirm Software Selection",
-            subtitle="Review and apply your package choices"
+            subtitle="Review and apply your additional software choices"
         )
         self.complete_button = Gtk.Button(label="Apply Software Plan")
         self.complete_button.set_valign(Gtk.Align.CENTER)
@@ -200,7 +209,7 @@ class PayloadPage(BaseConfigurationPage):
             
             row.set_active(group_info["selected"])
             row.connect("notify::active", self.on_group_toggled, group_id)
-            self.groups_section.add(row)
+            self.additional_section.add(row)
             
     def _populate_repositories(self):
         """Populate the repositories section."""
@@ -248,8 +257,8 @@ class PayloadPage(BaseConfigurationPage):
         is_minimal = switch_row.get_active()
         
         # Disable group selections if minimal is enabled
-        for i in range(self.groups_section.get_row_at_index(0) is not None and 10 or 0):
-            row = self.groups_section.get_row_at_index(i)
+        for i in range(self.additional_section.get_row_at_index(0) is not None and 10 or 0):
+            row = self.additional_section.get_row_at_index(i)
             if row and hasattr(row, 'set_sensitive'):
                 # Don't disable required groups
                 group_ids = list(self.package_groups.keys())
@@ -339,8 +348,8 @@ class PayloadPage(BaseConfigurationPage):
             "flatpak_enabled": self.flatpak_enabled,
             "custom_packages": self.custom_packages,
             "oem_repo_url": self.oem_repo_url,
-            "minimal_install": self.minimal_row.get_active(),
-            "keep_cache": self.cache_row.get_active()
+            "keep_cache": self.cache_row.get_active(),
+            "use_live_copy": True  # Always use live copy
         }
         
         # Show confirmation
@@ -351,15 +360,13 @@ class PayloadPage(BaseConfigurationPage):
         
         if self.flatpak_enabled:
             features.append("Flatpak")
-        if config_values["minimal_install"]:
-            features.append("Minimal")
         if self.custom_packages:
             features.append(f"{len(self.custom_packages)} custom packages")
             
         feature_text = f" ({', '.join(features)})" if features else ""
         
         total_software = package_count + flatpak_count
-        self.show_toast(f"Software plan: {total_software} packages ({package_count} DNF, {flatpak_count} Flatpak), {repo_count} repositories{feature_text}")
+        self.show_toast(f"Software plan: {total_software} additional packages ({package_count} DNF, {flatpak_count} Flatpak), {repo_count} repositories{feature_text}")
         
         print("Software configuration confirmed. Returning to summary.")
         super().mark_complete_and_return(button, config_values=config_values) 
