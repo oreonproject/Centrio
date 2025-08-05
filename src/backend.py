@@ -1340,13 +1340,19 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
             ]
             
             print(f"Attempting standard boot entry registration: {' '.join(efibootmgr_cmd)}")
-            success, err, stdout = _run_in_chroot(target_root, efibootmgr_cmd, "Register secure boot entry", timeout=60)
-            if success:
-                print("Successfully registered secure boot entry (standard)")
-                registration_success = True
-            else:
-                registration_errors.append(f"Standard method: {err}")
-                print(f"Standard registration failed: {err}")
+            # Run efibootmgr from host system (not chroot) to access UEFI firmware
+            try:
+                result = subprocess.run(efibootmgr_cmd, capture_output=True, text=True, check=False, timeout=60)
+                if result.returncode == 0:
+                    print("Successfully registered secure boot entry (standard)")
+                    print(f"efibootmgr output: {result.stdout}")
+                    registration_success = True
+                else:
+                    registration_errors.append(f"Standard method: {result.stderr}")
+                    print(f"Standard registration failed: {result.stderr}")
+            except Exception as e:
+                registration_errors.append(f"Standard method exception: {e}")
+                print(f"Standard registration exception: {e}")
             
             # Method 2: Try with removable media flag
             if not registration_success:
@@ -1359,13 +1365,18 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
                 ]
                 
                 print("Attempting removable media boot entry registration...")
-                success, err, stdout = _run_in_chroot(target_root, efibootmgr_cmd_removable, "Register removable boot entry", timeout=60)
-                if success:
-                    print("Successfully registered removable boot entry")
-                    registration_success = True
-                else:
-                    registration_errors.append(f"Removable method: {err}")
-                    print(f"Removable registration failed: {err}")
+                try:
+                    result = subprocess.run(efibootmgr_cmd_removable, capture_output=True, text=True, check=False, timeout=60)
+                    if result.returncode == 0:
+                        print("Successfully registered removable boot entry")
+                        print(f"efibootmgr output: {result.stdout}")
+                        registration_success = True
+                    else:
+                        registration_errors.append(f"Removable method: {result.stderr}")
+                        print(f"Removable registration failed: {result.stderr}")
+                except Exception as e:
+                    registration_errors.append(f"Removable method exception: {e}")
+                    print(f"Removable registration exception: {e}")
             
             # Method 3: Try with different loader path
             if not registration_success:
@@ -1377,13 +1388,18 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
                 ]
                 
                 print("Attempting alternative boot entry registration...")
-                success, err, stdout = _run_in_chroot(target_root, efibootmgr_cmd_alt, "Register alternative boot entry", timeout=60)
-                if success:
-                    print("Successfully registered alternative boot entry")
-                    registration_success = True
-                else:
-                    registration_errors.append(f"Alternative method: {err}")
-                    print(f"Alternative registration failed: {err}")
+                try:
+                    result = subprocess.run(efibootmgr_cmd_alt, capture_output=True, text=True, check=False, timeout=60)
+                    if result.returncode == 0:
+                        print("Successfully registered alternative boot entry")
+                        print(f"efibootmgr output: {result.stdout}")
+                        registration_success = True
+                    else:
+                        registration_errors.append(f"Alternative method: {result.stderr}")
+                        print(f"Alternative registration failed: {result.stderr}")
+                except Exception as e:
+                    registration_errors.append(f"Alternative method exception: {e}")
+                    print(f"Alternative registration exception: {e}")
             
             # Method 4: Manual fallback - create fallback boot file
             if not registration_success:
@@ -1415,6 +1431,31 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
                 
                 # Don't fail the installation, just warn
                 print("Continuing installation despite boot entry registration failure...")
+            else:
+                # Try to set the boot entry as the first boot option
+                try:
+                    # Get the boot entry number that was just created
+                    result = subprocess.run(["efibootmgr"], capture_output=True, text=True, check=False, timeout=30)
+                    if result.returncode == 0:
+                        # Parse the output to find our boot entry
+                        for line in result.stdout.split('\n'):
+                            if 'Oreon' in line and 'Boot' in line:
+                                # Extract boot number (e.g., "Boot0001* Oreon")
+                                match = re.search(r'Boot(\d+)\*?\s+Oreon', line)
+                                if match:
+                                    boot_num = match.group(1)
+                                    print(f"Found boot entry: Boot{boot_num}")
+                                    
+                                    # Set this as the first boot option
+                                    set_boot_cmd = ["efibootmgr", "-o", boot_num]
+                                    result = subprocess.run(set_boot_cmd, capture_output=True, text=True, check=False, timeout=30)
+                                    if result.returncode == 0:
+                                        print(f"Successfully set Boot{boot_num} as first boot option")
+                                    else:
+                                        print(f"Warning: Could not set boot order: {result.stderr}")
+                                    break
+                except Exception as e:
+                    print(f"Warning: Could not set boot order: {e}")
         else:
             print(f"WARNING: Could not parse EFI partition device: {efi_partition_device}")
             print("Boot entry registration skipped - you may need to manually configure boot order")
@@ -1504,36 +1545,58 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
                 return False, f"Missing required BIOS GRUB packages: {', '.join(missing_bios_packages)}. Could not install: {e}", None
         
         # Enhanced BIOS installation with better error handling
+        # Run grub2-install from host system to install to MBR
         grub_install_cmd = [
             "grub2-install", 
             "--target=i386-pc", 
             "--force",  # Force installation even if some checks fail
             "--recheck",  # Force probe of devices
+            "--boot-directory", os.path.join(target_root, "boot"),  # Point to target boot directory
             grub_target_disk  # Install to the disk MBR/boot sector
         ]
         
         print(f"Running BIOS GRUB installation: {' '.join(grub_install_cmd)}")
-        success, err, stdout = _run_in_chroot(target_root, grub_install_cmd, "Install GRUB (BIOS)", progress_callback, timeout=180)
+        try:
+            result = subprocess.run(grub_install_cmd, capture_output=True, text=True, check=False, timeout=180)
+            if result.returncode == 0:
+                print("BIOS GRUB installation completed successfully")
+                print(f"grub2-install output: {result.stdout}")
+            else:
+                error_msg = f"Failed to install GRUB for BIOS: {result.stderr}"
+                if result.stdout:
+                    error_msg += f"\nStdout: {result.stdout}"
+                
+                # Try fallback BIOS installation
+                print("Attempting fallback BIOS GRUB installation...")
+                fallback_cmd = [
+                    "grub2-install",
+                    "--target=i386-pc",
+                    "--force",
+                    "--skip-fs-probe",  # Skip filesystem probing
+                    "--boot-directory", os.path.join(target_root, "boot"),
+                    grub_target_disk
+                ]
+                result = subprocess.run(fallback_cmd, capture_output=True, text=True, check=False, timeout=180)
+                if result.returncode != 0:
+                    return False, error_msg, None
+                else:
+                    print("Fallback BIOS GRUB installation completed successfully")
+                    print(f"grub2-install fallback output: {result.stdout}")
+        except Exception as e:
+            return False, f"Exception during BIOS GRUB installation: {e}", None
         
-        if not success:
-            error_msg = f"Failed to install GRUB for BIOS: {err}"
-            if stdout:
-                error_msg += f"\nStdout: {stdout}"
-            
-            # Try fallback BIOS installation
-            print("Attempting fallback BIOS GRUB installation...")
-            fallback_cmd = [
-                "grub2-install",
-                "--target=i386-pc",
-                "--force",
-                "--skip-fs-probe",  # Skip filesystem probing
-                grub_target_disk
-            ]
-            success, err, stdout = _run_in_chroot(target_root, fallback_cmd, "Install GRUB (BIOS fallback)", progress_callback, timeout=180)
-            if not success:
-                return False, error_msg, None
-        
-        print("BIOS GRUB installation completed successfully")
+        # Verify MBR was written properly for BIOS systems
+        try:
+            # Check if GRUB signature is present in MBR
+            check_mbr_cmd = ["dd", "if=" + grub_target_disk, "bs=512", "count=1", "status=none"]
+            result = subprocess.run(check_mbr_cmd, capture_output=True, check=False, timeout=30)
+            if result.returncode == 0 and b"GRUB" in result.stdout:
+                print("✓ GRUB signature found in MBR")
+            else:
+                print("⚠ Could not verify GRUB signature in MBR")
+                print("This may indicate the bootloader was not properly installed")
+        except Exception as e:
+            print(f"⚠ Could not check MBR: {e}")
 
     # --- Generate GRUB config (Common to UEFI and BIOS) --- 
     print(f"Generating GRUB configuration file (grub.cfg) for {bootloader_id}...")
@@ -1572,6 +1635,18 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     env = os.environ.copy()
     env['GRUB_DISABLE_OS_PROBER'] = 'true'  # Disable os-prober to avoid scanning other systems
     env['GRUB_DEVICE'] = primary_disk  # Set the target device
+    
+    # Set additional environment variables for proper GRUB configuration
+    env['GRUB_DEFAULT'] = '0'  # Set first entry as default
+    env['GRUB_TIMEOUT'] = '5'  # 5 second timeout
+    env['GRUB_DISTRIBUTOR'] = 'Oreon'  # Set distributor name
+    env['GRUB_CMDLINE_LINUX_DEFAULT'] = 'rhgb quiet'  # Default kernel parameters
+    env['GRUB_CMDLINE_LINUX'] = ''  # Additional kernel parameters
+    
+    # Point GRUB to the target system's files
+    env['GRUB_PREFIX'] = '(hd0,msdos1)/grub2' if not is_uefi else '(hd0,gpt1)/EFI/Oreon'
+    env['GRUB_TERMINAL_INPUT'] = 'console'
+    env['GRUB_TERMINAL_OUTPUT'] = 'console'
     
     # Create a temporary grub.cfg file
     temp_grub_cfg = "/tmp/grub.cfg.tmp"
