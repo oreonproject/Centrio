@@ -714,6 +714,11 @@ class ProgressPage(Gtk.Box):
         network_enabled = network_config.get('network_enabled', False)
         skip_network = network_config.get('skip_network', False)
         
+        print(f"Network configuration check:")
+        print(f"  network_enabled: {network_enabled}")
+        print(f"  skip_network: {skip_network}")
+        print(f"  network_config: {network_config}")
+        
         if skip_network:
             self._update_progress_text("Network configuration skipped - only base system installed.", 0.85)
             print("Network configuration skipped - no additional packages will be installed")
@@ -729,6 +734,18 @@ class ProgressPage(Gtk.Box):
         repositories = payload_config.get('repositories', [])
         flatpak_enabled = payload_config.get('flatpak_enabled', False)
         flatpak_packages = payload_config.get('flatpak_packages', [])
+        
+        print(f"Additional packages check:")
+        print(f"  packages: {packages}")
+        print(f"  repositories: {repositories}")
+        print(f"  flatpak_enabled: {flatpak_enabled}")
+        print(f"  flatpak_packages: {flatpak_packages}")
+        
+        # Double-check: if network is disabled, don't install any packages
+        if not network_enabled or skip_network:
+            self._update_progress_text("Network disabled - only base system installed.", 0.85)
+            print("Network disabled - no additional packages will be installed (double-check)")
+            return True
         
         if packages or repositories or flatpak_enabled:
             self._update_progress_text("Installing additional packages on live environment...", 0.8)

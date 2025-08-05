@@ -665,7 +665,11 @@ def _install_packages_dnf_impl(target_root, packages, progress_callback=None, ke
         "--exclude=steam",
         "--exclude=lutris",
         "--exclude=wine",
-        "--exclude=libreoffice*"
+        "--exclude=libreoffice*",
+        "--exclude=oreon-*",
+        "--setopt=tsflags=noscripts",  # Skip problematic scriptlets
+        "--setopt=installonly_limit=0",  # Don't limit kernel installations
+        "--setopt=keepcache=1" if keep_cache else "--setopt=keepcache=0"
     ]
     
     if not keep_cache:
@@ -791,22 +795,25 @@ def _install_packages_dnf_impl(target_root, packages, progress_callback=None, ke
         
         if return_code != 0:
             stderr_text = stderr_output.strip() if stderr_output else ""
-            error_msg = f"DNF installation failed (rc={return_code}). Stderr:\n{stderr_text}"
+            
+            # Check for specific error types
+            if "no match for group package" in stderr_text.lower():
+                error_msg = f"DNF installation failed: Group package not found. This may be due to missing repositories or package groups. Error: {stderr_text}"
+            elif "prein scriptlet" in stderr_text.lower():
+                error_msg = f"DNF installation failed: PREIN scriptlet error. This may be due to package conflicts. Error: {stderr_text}"
+            elif "conflicts" in stderr_text.lower():
+                error_msg = f"DNF installation failed: Package conflicts detected. Error: {stderr_text}"
+            else:
+                error_msg = f"DNF installation failed (rc={return_code}). Stderr:\n{stderr_text}"
+            
             print(f"ERROR: {error_msg}")
             if progress_callback:
                 progress_callback(error_msg, last_fraction)
             return False, error_msg
         else:
-            print("SUCCESS: DNF installation completed.")
-            # Sync after installation
-            try:
-                subprocess.run(["sync"], check=False, timeout=15)
-                print("Sync complete.")
-            except Exception as sync_e:
-                print(f"Warning: Sync after DNF failed: {sync_e}")
-            
+            print("SUCCESS: DNF package installation completed.")
             if progress_callback:
-                progress_callback("DNF installation complete.", 1.0)
+                progress_callback("DNF package installation completed successfully.", 0.8)
             return True, ""
             
     except FileNotFoundError:

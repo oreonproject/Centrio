@@ -17,11 +17,11 @@ DEFAULT_PACKAGE_GROUPS = {
         "selected": True
     },
     "desktop": {
-        "name": "Desktop Environment",
-        "description": "GNOME desktop environment and basic applications",
-        "packages": ["@gnome-desktop", "@core", "gnome-shell", "gdm", "oreon-release", "oreon-logos", "gnome-shell-extension-*-oreon"],
+        "name": "Additional Desktop Software",
+        "description": "Extra desktop applications and utilities (desktop environment already included)",
+        "packages": ["gnome-tweaks", "gnome-extensions-app"],
         "required": False,
-        "selected": True
+        "selected": False
     },
     "multimedia": {
         "name": "Multimedia Support",
