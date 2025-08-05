@@ -1564,42 +1564,52 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     
     print(f"Final GRUB config path: {grub_cfg_path}")
     
-    # Check if grub2-mkconfig is available in the target system
-    print("Checking if grub2-mkconfig is available...")
-    check_grub_cmd = ["which", "grub2-mkconfig"]
-    grub_available, _, _ = _run_in_chroot(target_root, check_grub_cmd, "Check GRUB2 availability", progress_callback, timeout=30)
+    # Generate GRUB config from host system (no chroot needed)
+    print("Generating GRUB config from host system...")
     
-    if not grub_available:
-        print("grub2-mkconfig not found in target system. Installing GRUB2 packages...")
-        # Install essential GRUB2 packages
-        grub_packages = ["grub2-common", "grub2-tools", "grub2-efi-x64", "grub2-efi-x64-modules"]
-        if not is_uefi:
-            grub_packages.append("grub2-pc")
-        
-        install_cmd = ["dnf", "install", "-y", "--nogpgcheck", f"--installroot={target_root}"]
-        install_cmd.extend(grub_packages)
-        
-        install_success, install_err, install_stdout = _run_command(install_cmd, "Install GRUB2 packages", progress_callback, timeout=300)
-        if not install_success:
-            print(f"Failed to install GRUB2 packages: {install_err}")
-            return False, f"Failed to install GRUB2 packages: {install_err}", None
-        
-        # Check again if grub2-mkconfig is now available
-        grub_available, _, _ = _run_in_chroot(target_root, check_grub_cmd, "Check GRUB2 availability after install", progress_callback, timeout=30)
-        if not grub_available:
-            print("grub2-mkconfig still not available after package installation")
-            return False, "GRUB2 packages installed but grub2-mkconfig still not available", None
+    # Generate GRUB config from host system (no chroot needed)
+    # Set environment variables to point to the target system
+    env = os.environ.copy()
+    env['GRUB_DISABLE_OS_PROBER'] = 'true'  # Disable os-prober to avoid scanning other systems
+    env['GRUB_DEVICE'] = primary_disk  # Set the target device
     
-    print("grub2-mkconfig is available. Generating GRUB config...")
+    # Create a temporary grub.cfg file
+    temp_grub_cfg = "/tmp/grub.cfg.tmp"
+    grub_mkconfig_cmd = ["grub2-mkconfig", "-o", temp_grub_cfg]
     
-    # Generate GRUB config
-    grub_mkconfig_cmd = ["grub2-mkconfig", "-o", grub_cfg_path]
-    success, err, stdout = _run_in_chroot(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
-    # Log output even on success for debugging
-    print(f"grub2-mkconfig finished. Success: {success}. Stderr: {err}. Stdout: {stdout}") 
-    if not success: 
-        print(f"Failed to generate GRUB config: {err}")
-        return False, err, None
+    print(f"Running grub2-mkconfig from host: {' '.join(grub_mkconfig_cmd)}")
+    try:
+        result = subprocess.run(
+            grub_mkconfig_cmd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False
+        )
+        
+        if result.returncode != 0:
+            print(f"grub2-mkconfig failed: {result.stderr}")
+            return False, f"Failed to generate GRUB config: {result.stderr}", None
+        
+        print(f"grub2-mkconfig succeeded. Stdout: {result.stdout}")
+        
+        # Copy the generated config to the target system
+        if os.path.exists(temp_grub_cfg):
+            grub_cfg_full_path = os.path.join(target_root, grub_cfg_path.lstrip('/'))
+            os.makedirs(os.path.dirname(grub_cfg_full_path), exist_ok=True)
+            shutil.copy2(temp_grub_cfg, grub_cfg_full_path)
+            print(f"Copied GRUB config to target: {grub_cfg_full_path}")
+            
+            # Clean up temp file
+            os.remove(temp_grub_cfg)
+        else:
+            return False, "GRUB config file was not generated", None
+            
+    except subprocess.TimeoutExpired:
+        return False, "Timeout generating GRUB config", None
+    except Exception as e:
+        return False, f"Error generating GRUB config: {e}", None
     
     # Verify the config file was created and has content
     if not grub_cfg_path:
