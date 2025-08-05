@@ -2180,7 +2180,7 @@ def copy_live_environment(target_root, progress_callback=None):
         "-a",  # Archive mode (preserves permissions, timestamps, etc.)
         "-H",  # Preserve hard links
         "-A",  # Preserve ACLs
-        "-X",  # Preserve extended attributes
+        "--no-xattrs",  # Don't preserve extended attributes (avoids SELinux issues)
         "--numeric-ids",  # Preserve user/group IDs
         "--one-file-system",  # Don't cross filesystem boundaries
         "--delete",  # Remove files in destination that don't exist in source

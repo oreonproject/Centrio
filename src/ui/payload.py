@@ -104,9 +104,9 @@ class PayloadPage(BaseConfigurationPage):
         # Live environment copy info
         self.live_copy_info = Adw.ActionRow(
             title="Live Environment Copy",
-            subtitle="Copy the entire live system to disk (fast and reliable)"
+            subtitle="Copy the entire live system to disk"
         )
-        info_icon = Gtk.Image.new_from_icon_name("emblem-ok-symbolic")
+        info_icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
         info_icon.add_css_class("success")
         self.live_copy_info.add_prefix(info_icon)
         self.method_section.add(self.live_copy_info)
