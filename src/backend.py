@@ -1564,6 +1564,34 @@ def install_bootloader_in_container(target_root, primary_disk, efi_partition_dev
     
     print(f"Final GRUB config path: {grub_cfg_path}")
     
+    # Check if grub2-mkconfig is available in the target system
+    print("Checking if grub2-mkconfig is available...")
+    check_grub_cmd = ["which", "grub2-mkconfig"]
+    grub_available, _, _ = _run_in_chroot(target_root, check_grub_cmd, "Check GRUB2 availability", progress_callback, timeout=30)
+    
+    if not grub_available:
+        print("grub2-mkconfig not found in target system. Installing GRUB2 packages...")
+        # Install essential GRUB2 packages
+        grub_packages = ["grub2-common", "grub2-tools", "grub2-efi-x64", "grub2-efi-x64-modules"]
+        if not is_uefi:
+            grub_packages.append("grub2-pc")
+        
+        install_cmd = ["dnf", "install", "-y", "--nogpgcheck", f"--installroot={target_root}"]
+        install_cmd.extend(grub_packages)
+        
+        install_success, install_err, install_stdout = _run_command(install_cmd, "Install GRUB2 packages", progress_callback, timeout=300)
+        if not install_success:
+            print(f"Failed to install GRUB2 packages: {install_err}")
+            return False, f"Failed to install GRUB2 packages: {install_err}", None
+        
+        # Check again if grub2-mkconfig is now available
+        grub_available, _, _ = _run_in_chroot(target_root, check_grub_cmd, "Check GRUB2 availability after install", progress_callback, timeout=30)
+        if not grub_available:
+            print("grub2-mkconfig still not available after package installation")
+            return False, "GRUB2 packages installed but grub2-mkconfig still not available", None
+    
+    print("grub2-mkconfig is available. Generating GRUB config...")
+    
     # Generate GRUB config
     grub_mkconfig_cmd = ["grub2-mkconfig", "-o", grub_cfg_path]
     success, err, stdout = _run_in_chroot(target_root, grub_mkconfig_cmd, "Generate GRUB Config", progress_callback, timeout=120)
