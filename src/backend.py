@@ -2217,40 +2217,79 @@ def copy_live_environment(target_root, progress_callback=None):
             bufsize=1
         )
         
-        # Progress tracking patterns
-        progress_re = re.compile(r"^\s*(\d+,\d+)\s+(\d+%)\s+(\d+\.\d+[KMG]B/s)\s+(\d+:\d+:\d+)\s+")
+        # Progress tracking patterns for different rsync output formats
+        progress_patterns = [
+            re.compile(r"^\s*(\d+,\d+)\s+(\d+%)\s+(\d+\.\d+[KMG]B/s)\s+(\d+:\d+:\d+)\s+"),  # Standard format
+            re.compile(r"^\s*(\d+%)\s+(\d+\.\d+[KMG]B/s)\s+(\d+:\d+:\d+)"),  # Simplified format
+            re.compile(r"^\s*(\d+%)\s+(\d+\.\d+[KMG]B/s)"),  # Basic format
+        ]
         
         last_fraction = 0.1
         last_progress = ""
+        line_count = 0
+        last_progress_update = time.time()
         
         # Read stderr for progress (rsync sends progress to stderr)
         if process.stderr is not None:
             for line in iter(process.stderr.readline, ''):
                 line_strip = line.strip()
+                line_count += 1
+                current_time = time.time()
+                
                 if not line_strip:
                     continue
                 
-                # Parse progress information
-                match = progress_re.search(line_strip)
-                if match:
-                    transferred, percent, speed, eta = match.groups()
-                    # Convert percentage to fraction (0.1 to 0.9 range)
-                    try:
-                        percent_num = int(percent.rstrip('%'))
-                        fraction = 0.1 + (percent_num / 100.0) * 0.8
-                        message = f"Copying live environment: {percent} complete ({speed})"
-                        
-                        if progress_callback:
-                            progress_callback(message, fraction)
-                        
-                        last_fraction = fraction
-                        last_progress = line_strip
-                    except ValueError:
-                        pass
-                else:
-                    # Log non-progress lines
-                    if "error" in line_strip.lower() or "failed" in line_strip.lower():
-                        print(f"rsync warning: {line_strip}")
+                # Parse progress information using multiple patterns
+                progress_found = False
+                for pattern in progress_patterns:
+                    match = pattern.search(line_strip)
+                    if match:
+                        progress_found = True
+                        try:
+                            if len(match.groups()) >= 2:
+                                percent_str = match.group(2) if len(match.groups()) >= 2 else match.group(1)
+                                speed_str = match.group(3) if len(match.groups()) >= 3 else "N/A"
+                                
+                                # Extract percentage
+                                if '%' in percent_str:
+                                    percent_num = int(percent_str.rstrip('%'))
+                                else:
+                                    # Try to parse from first group if no % found
+                                    percent_num = int(percent_str.rstrip('%'))
+                                
+                                # Convert percentage to fraction (0.1 to 0.9 range)
+                                fraction = 0.1 + (percent_num / 100.0) * 0.8
+                                message = f"Copying live environment: {percent_num}% complete ({speed_str})"
+                                
+                                if progress_callback:
+                                    progress_callback(message, fraction)
+                                
+                                last_fraction = fraction
+                                last_progress = line_strip
+                                last_progress_update = current_time
+                                print(f"Progress: {percent_num}% - {speed_str}")
+                                break
+                        except (ValueError, IndexError) as e:
+                            print(f"Could not parse progress line: {line_strip} (error: {e})")
+                            continue
+                
+                if not progress_found:
+                    # Log non-progress lines (but not too many)
+                    if ("error" in line_strip.lower() or "failed" in line_strip.lower() or 
+                        "warning" in line_strip.lower()):
+                        print(f"rsync: {line_strip}")
+                    elif line_strip and not line_strip.startswith('building file list'):
+                        # Log other important lines but not too frequently
+                        if len(line_strip) < 100:  # Avoid very long lines
+                            print(f"rsync: {line_strip}")
+                
+                # Fallback progress update every 30 seconds if no progress detected
+                if not progress_found and (current_time - last_progress_update) > 30:
+                    # Estimate progress based on line count or time
+                    estimated_fraction = min(0.9, 0.1 + (line_count / 1000.0) * 0.8)
+                    if progress_callback:
+                        progress_callback(f"Copying live environment... (processing files)", estimated_fraction)
+                    last_progress_update = current_time
                 
                 # Check if process exited
                 if process.poll() is not None:
@@ -2278,7 +2317,7 @@ def copy_live_environment(target_root, progress_callback=None):
         else:
             print("SUCCESS: Live environment copy completed.")
             if progress_callback:
-                progress_callback("Live environment copy complete.", 0.9)
+                progress_callback("Live environment copy completed successfully.", 0.9)
             return True, ""
             
     except FileNotFoundError:
