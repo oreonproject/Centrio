@@ -511,7 +511,7 @@ def setup_repositories(target_root, repositories, progress_callback=None):
                 with open(repo_file_path, 'w') as f:
                     f.write(f"""[{repo_id}]
 name={repo_name}
-baseurl={repo_url}
+baseurl={repo_url} \
 enabled=1
 gpgcheck=0
 """)
@@ -2124,7 +2124,6 @@ def copy_live_environment(target_root, progress_callback=None):
     copy_directories = [
         "/bin",
         "/boot", 
-        "/dev",  # Will be recreated by system
         "/etc",
         "/home",
         "/lib",
@@ -2132,13 +2131,9 @@ def copy_live_environment(target_root, progress_callback=None):
         "/media",
         "/mnt",
         "/opt",
-        "/proc",  # Will be recreated by system
         "/root",
-        "/run",   # Will be recreated by system
         "/sbin",
         "/srv",
-        "/sys",   # Will be recreated by system
-        "/tmp",   # Will be recreated by system
         "/usr",
         "/var"
     ]
@@ -2169,185 +2164,54 @@ def copy_live_environment(target_root, progress_callback=None):
         "/tmp/*"  # Clear temp
     ]
     
-    # Build rsync exclude list
-    exclude_args = []
-    for exclude in exclude_directories + exclude_files:
-        exclude_args.extend(["--exclude", exclude])
-    
-    # Add additional rsync options for better performance and safety
-    rsync_options = [
-        "rsync",
-        "-a",  # Archive mode (preserves permissions, timestamps, etc.)
-        "-H",  # Preserve hard links
-        "-A",  # Preserve ACLs
-        "--no-xattrs",  # Don't preserve extended attributes (avoids SELinux issues)
-        "--numeric-ids",  # Preserve user/group IDs
-        "--one-file-system",  # Don't cross filesystem boundaries
-        "--delete",  # Remove files in destination that don't exist in source
-        "--force",  # Force deletion of directories even if not empty
-        "--ignore-errors",  # Skip files that can't be transferred
-        "--progress",  # Show progress
-        "--stats"  # Show transfer statistics
-    ]
-    
-    # Add exclude arguments
-    rsync_options.extend(exclude_args)
-    
-    # Source and destination
-    source = "/"
-    destination = target_root.rstrip('/') + "/"
-    
-    # Build final command
-    rsync_cmd = rsync_options + [source, destination]
-    
-    print(f"Executing rsync command: {' '.join(shlex.quote(c) for c in rsync_cmd[:10])}...")
-    
     if progress_callback:
         progress_callback("Copying live environment to target disk...", 0.1)
     
-    # Execute rsync with progress tracking
-    process = None
-    stderr_output = ""
-    try:
-        process = subprocess.Popen(
-            rsync_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1
-        )
+    # Use cp with progress tracking
+    total_dirs = len(copy_directories)
+    completed_dirs = 0
+    
+    for directory in copy_directories:
+        source = directory
+        destination = os.path.join(target_root, directory.lstrip('/'))
         
-        # Progress tracking patterns for different rsync output formats
-        progress_patterns = [
-            re.compile(r"^\s*(\d+,\d+)\s+(\d+%)\s+(\d+\.\d+[KMG]B/s)\s+(\d+:\d+:\d+)\s+"),  # Standard format
-            re.compile(r"^\s*(\d+%)\s+(\d+\.\d+[KMG]B/s)\s+(\d+:\d+:\d+)"),  # Simplified format
-            re.compile(r"^\s*(\d+%)\s+(\d+\.\d+[KMG]B/s)"),  # Basic format
-        ]
+        # Create destination directory if it doesn't exist
+        os.makedirs(destination, exist_ok=True)
         
-        last_fraction = 0.1
-        last_progress = ""
-        line_count = 0
-        last_progress_update = time.time()
+        # Copy directory using cp with progress
+        cp_cmd = ["cp", "-a", "--preserve=all", source, destination]
         
-        # Read stderr for progress (rsync sends progress to stderr)
-        if process.stderr is not None:
-            for line in iter(process.stderr.readline, ''):
-                line_strip = line.strip()
-                line_count += 1
-                current_time = time.time()
-                
-                if not line_strip:
-                    continue
-                
-                # Parse progress information using multiple patterns
-                progress_found = False
-                for pattern in progress_patterns:
-                    match = pattern.search(line_strip)
-                    if match:
-                        progress_found = True
-                        try:
-                            if len(match.groups()) >= 2:
-                                percent_str = match.group(2) if len(match.groups()) >= 2 else match.group(1)
-                                speed_str = match.group(3) if len(match.groups()) >= 3 else "N/A"
-                                
-                                # Extract percentage
-                                if '%' in percent_str:
-                                    percent_num = int(percent_str.rstrip('%'))
-                                else:
-                                    # Try to parse from first group if no % found
-                                    percent_num = int(percent_str.rstrip('%'))
-                                
-                                # Convert percentage to fraction (0.1 to 0.9 range)
-                                fraction = 0.1 + (percent_num / 100.0) * 0.8
-                                message = f"Copying live environment: {percent_num}% complete ({speed_str})"
-                                
-                                if progress_callback:
-                                    progress_callback(message, fraction)
-                                
-                                last_fraction = fraction
-                                last_progress = line_strip
-                                last_progress_update = current_time
-                                print(f"Progress: {percent_num}% - {speed_str}")
-                                break
-                        except (ValueError, IndexError) as e:
-                            print(f"Could not parse progress line: {line_strip} (error: {e})")
-                            continue
-                
-                if not progress_found:
-                    # Log non-progress lines (but not too many)
-                    if ("error" in line_strip.lower() or "failed" in line_strip.lower() or 
-                        "warning" in line_strip.lower()):
-                        print(f"rsync: {line_strip}")
-                    elif line_strip and not line_strip.startswith('building file list'):
-                        # Log other important lines but not too frequently
-                        if len(line_strip) < 100:  # Avoid very long lines
-                            print(f"rsync: {line_strip}")
-                
-                # Fallback progress update every 30 seconds if no progress detected
-                if not progress_found and (current_time - last_progress_update) > 30:
-                    # Estimate progress based on line count or time
-                    estimated_fraction = min(0.9, 0.1 + (line_count / 1000.0) * 0.8)
-                    if progress_callback:
-                        progress_callback(f"Copying live environment... (processing files)", estimated_fraction)
-                    last_progress_update = current_time
-                
-                # Check if process exited
-                if process.poll() is not None:
-                    print("rsync process completed while reading output.")
-                    break
-        else:
-            raise RuntimeError("process.stderr is None; cannot read rsync progress")
+        print(f"Copying {source} to {destination}...")
         
-        # Wait for process completion
-        process.stderr.close()
-        return_code = process.wait(timeout=3600)  # 1 hour timeout
-        
-        # Read stdout for final statistics
-        if process.stdout:
-            stdout_output = process.stdout.read()
-            process.stdout.close()
-        
-        if return_code != 0:
-            stderr_text = stderr_output.strip() if stderr_output else ""
-            error_msg = f"rsync copy failed (rc={return_code}). Stderr:\n{stderr_text}"
+        try:
+            # Run cp command
+            result = subprocess.run(cp_cmd, capture_output=True, text=True, check=True, timeout=1800)  # 30 min timeout per dir
+            
+            completed_dirs += 1
+            progress_fraction = 0.1 + (completed_dirs / total_dirs) * 0.8
+            
+            if progress_callback:
+                progress_callback(f"Copied {directory} ({completed_dirs}/{total_dirs})", progress_fraction)
+            
+            print(f"Successfully copied {directory}")
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Failed to copy {directory}: {e.stderr.strip()}"
             print(f"ERROR: {error_msg}")
             if progress_callback:
-                progress_callback(error_msg, last_fraction)
+                progress_callback(error_msg, progress_fraction)
             return False, error_msg
-        else:
-            print("SUCCESS: Live environment copy completed.")
+        except subprocess.TimeoutExpired:
+            error_msg = f"Timeout copying {directory} (30 minutes)"
+            print(f"ERROR: {error_msg}")
             if progress_callback:
-                progress_callback("Live environment copy completed successfully.", 0.9)
-            return True, ""
-            
-    except FileNotFoundError:
-        err = "Command not found: rsync. Cannot copy live environment."
-        print(f"ERROR: {err}")
-        if progress_callback:
-            progress_callback(err, 0.0)
-        return False, err
-    except subprocess.TimeoutExpired:
-        err = "Timeout expired during rsync copy (1 hour)."
-        print(f"ERROR: {err}")
-        if process:
-            process.kill()
-        if progress_callback:
-            progress_callback(err, last_fraction)
-        return False, err
-    except Exception as e:
-        err = f"Unexpected error during rsync copy: {e}\nStderr: {stderr_output}"
-        print(f"ERROR: {err}")
-        if process:
-            process.kill()
-        if progress_callback:
-            progress_callback(err, last_fraction)
-        return False, err
-    finally:
-        if process:
-            if process.stdout and not process.stdout.closed:
-                process.stdout.close()
-            if process.stderr and not process.stderr.closed:
-                process.stderr.close()
+                progress_callback(error_msg, progress_fraction)
+            return False, error_msg
+    
+    print("SUCCESS: Live environment copy completed.")
+    if progress_callback:
+        progress_callback("Live environment copy completed successfully.", 0.9)
+    return True, ""
 
 def setup_live_environment_post_copy(target_root, progress_callback=None):
     """Sets up the copied live environment for booting from the target disk.
