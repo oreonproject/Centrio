@@ -2178,14 +2178,15 @@ def copy_live_environment(target_root, progress_callback=None):
         # Create destination directory if it doesn't exist
         os.makedirs(destination, exist_ok=True)
         
-        # Copy directory using cp with progress
-        cp_cmd = ["cp", "-a", "--preserve=all", source, destination]
-        
         print(f"Copying {source} to {destination}...")
         
         try:
-            # Run cp command
-            result = subprocess.run(cp_cmd, capture_output=True, text=True, check=True, timeout=1800)  # 30 min timeout per dir
+            # Use find to copy all files and directories from source to destination
+            # This avoids the "copy into itself" issue
+            find_cmd = ["find", source, "-mindepth", "1", "-maxdepth", "1", "-exec", "cp", "-a", "--preserve=all", "{}", destination, ";"]
+            
+            # Run find command
+            result = subprocess.run(find_cmd, capture_output=True, text=True, check=True, timeout=1800)  # 30 min timeout per dir
             
             completed_dirs += 1
             progress_fraction = 0.1 + (completed_dirs / total_dirs) * 0.8
