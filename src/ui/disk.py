@@ -52,7 +52,8 @@ def generate_gpt_commands(disk_path, efi_size_mb=512, filesystem="btrfs", dual_b
     # Layout decisions
     if bios_mode:
         # BIOS on GPT requires a bios_grub partition for core.img embedding
-        root_start = "3MiB"
+        # Make it 4 MiB to satisfy alignment and tool thresholds
+        root_start = "4MiB"
         root_end = "100%"
         commands.append(["parted", "-s", disk_path, "mklabel", "gpt"])
         commands.append(["parted", "-s", disk_path, "mkpart", "\"BIOS boot\"", "", first_start, bios_end])
@@ -76,19 +77,23 @@ def generate_gpt_commands(disk_path, efi_size_mb=512, filesystem="btrfs", dual_b
     
     return commands
 
-def generate_mkfs_commands(disk_path, filesystem="btrfs", partition_prefix="", dual_boot=False, preserve_efi=False, include_efi=True):
+def generate_mkfs_commands(disk_path, filesystem="btrfs", partition_prefix="", dual_boot=False, preserve_efi=False, include_efi=True, bios_mode=False):
     """Generates mkfs commands for partitions.
     - include_efi=True: partition 1 is EFI (vfat), partition 2 is root
     - include_efi=False: partition 1 is root
     """
     commands = []
     # Determine partition device names consistently
-    if include_efi:
+    if bios_mode:
+        # BIOS layout: p1 is bios_grub (no fs), p2 is root
+        root_part = f"{disk_path}{partition_prefix}2"
+    elif include_efi:
         efi_part = f"{disk_path}{partition_prefix}1"
         root_part = f"{disk_path}{partition_prefix}2"
         if not (dual_boot and preserve_efi):
             commands.append(["mkfs.vfat", "-F32", efi_part])
     else:
+        # Non-UEFI layout without bios_grub (unlikely here)
         root_part = f"{disk_path}{partition_prefix}1"
 
     # Format root partition with selected filesystem
@@ -846,7 +851,8 @@ class DiskPage(BaseConfigurationPage):
                 partition_prefix=partition_prefix,
                 dual_boot=self.dual_boot_enabled,
                 preserve_efi=self.preserve_efi if is_uefi else False,
-                include_efi=include_efi
+                include_efi=include_efi,
+                bios_mode=not is_uefi
             )
             config_values["commands"].extend(mkfs_cmds)
             print(f"Mkfs commands: {mkfs_cmds}")
