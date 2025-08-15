@@ -842,6 +842,20 @@ class ProgressPage(Gtk.Box):
              return False 
         return True 
 
+    def _generate_fstab(self, config_data):
+        """Generate /etc/fstab in the target root after copying the system."""
+        if self.stop_requested: return False, "Stop requested"
+        self._update_progress_text("Generating fstab...", 0.75)
+        try:
+            success, err = backend.generate_fstab_for_target(self.target_root)
+            if not success:
+                # Not fatal, but warn and continue
+                print(f"Warning: fstab generation issue: {err}")
+            return True
+        except Exception as e:
+            print(f"Warning: fstab generation raised exception: {e}")
+            return True
+
     def _install_bootloader(self, config_data):
         """Installs bootloader using backend function."""
         if self.stop_requested: return False, "Stop requested"
@@ -911,6 +925,7 @@ class ProgressPage(Gtk.Box):
              # Updated fractions slightly 
              (self._execute_storage_setup,      config_data.get('disk', {}), 0.00,  0.30), # 30%
              (self._copy_live_environment,      config_data,             0.30,  0.75), # 45%
+             (self._generate_fstab,             config_data,             0.75,  0.75), # Ensure fstab exists
              (self._debug_find_shim,            config_data,             0.75,  0.75), # Debug step
              (self._configure_system,           config_data,             0.75,  0.80), # 5%
              (self._create_user,                config_data,             0.80,  0.85), # 5%
