@@ -1,8 +1,5 @@
 # centrio_installer/utils.py
-import gi
-gi.require_version('Gtk', '4.0')
-gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, Gio # Added Gio for file operations
+
 
 import os
 import re
@@ -108,13 +105,13 @@ def ana_get_available_locales():
         "de_DE.UTF-8": "German (Germany)"
     } 
 
-from constants import APP_ID
+# Note: Avoid importing GUI or app-specific constants here to keep utils lightweight.
 
 def get_os_release_info(target_root=None):
     """Parses /etc/os-release (or /usr/lib/os-release) to get NAME and VERSION_ID.
     If target_root is provided, reads from within that root.
     """
-    info = {"NAME": "Linux", "VERSION_ID": None, "ID": None} # Defaults
+    info = {"NAME": "Linux", "VERSION": None, "VERSION_ID": None, "ID": None} # Defaults
     release_file_path = None
     base_path = target_root if target_root else "/"
     
@@ -138,8 +135,8 @@ def get_os_release_info(target_root=None):
                         key, value = line.split('=', 1)
                         # Remove quotes from value if present
                         value = value.strip('"\'') 
-                        # Store common keys
-                        if key in ["NAME", "VERSION_ID", "ID"]:
+                        # Store common keys (include VERSION for nicer display)
+                        if key in ["NAME", "VERSION", "VERSION_ID", "ID"]:
                             info[key] = value
         except Exception as e:
             print(f"Warning: Failed to parse {release_file_path}: {e}")

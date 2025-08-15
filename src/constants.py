@@ -1,7 +1,7 @@
 # centrio_installer/constants.py
 
-# Application ID
-APP_ID = "org.example.CentrioInstaller"
+# Application ID (should match Adw.Application application_id)
+APP_ID = "org.centrio.installer"
 
 # --- Anaconda D-Bus Constants --- 
 ANACONDA_BUS_ADDR_FILE = "/tmp/anaconda.bus.address" # Example typical location

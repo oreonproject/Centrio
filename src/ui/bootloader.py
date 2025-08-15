@@ -10,7 +10,6 @@ from .base import BaseConfigurationPage
 class BootloaderPage(BaseConfigurationPage):
     """Page for Bootloader Configuration (Placeholder)."""
     def __init__(self, main_window, overlay_widget, **kwargs):
-        # Note: Title uses &amp; for ampersand
         super().__init__(title="Bootloader Configuration", subtitle="Confirm bootloader installation", main_window=main_window, overlay_widget=overlay_widget, **kwargs)
         self.bootloader_enabled = True # Default to enabled
 

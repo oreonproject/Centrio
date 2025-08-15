@@ -8,6 +8,7 @@ import os
 import logging
 import gettext
 import locale
+from pathlib import Path
 
 # Set up logging
 logging.basicConfig(
@@ -24,8 +25,10 @@ def setup_i18n():
         if not current_locale:
             current_locale = 'en_US'
         
-        # Set up gettext
-        gettext.install('centrio', localedir='locale')
+        # Set up gettext with absolute locale dir
+        project_root = Path(__file__).resolve().parent.parent
+        locale_dir = str(project_root / 'locale')
+        gettext.install('centrio', localedir=locale_dir)
         
         # Try to set the locale
         try:
