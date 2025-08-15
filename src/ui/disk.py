@@ -32,57 +32,72 @@ def generate_wipefs_command(disk_path):
     """Generates the wipefs command for a disk."""
     return ["wipefs", "-a", disk_path]
 
-def generate_gpt_commands(disk_path, efi_size_mb=512, filesystem="btrfs", dual_boot=False, preserve_efi=False):
-    """Generates parted commands for GPT layout with customizable filesystem and dual boot support."""
+def generate_gpt_commands(disk_path, efi_size_mb=512, filesystem="btrfs", dual_boot=False, preserve_efi=False, bios_mode=False):
+    """Generates parted commands for GPT layout.
+    - UEFI (bios_mode=False): creates EFI System Partition + root
+    - BIOS (bios_mode=True): creates BIOS Boot Partition + root
+    """
     commands = []
     if not disk_path:
         print("ERROR: generate_gpt_commands called without disk_path")
         return []
 
     # Define partition start and end points
-    efi_start = "1MiB"
-    efi_end = f"{efi_size_mb + 1}MiB"
+    first_start = "1MiB"
+    if bios_mode:
+        bios_end = "3MiB"  # ~2MiB bios_grub region is sufficient
+    else:
+        efi_end = f"{efi_size_mb + 1}MiB"
     
-    if dual_boot and preserve_efi:
-        # Don't create new GPT table or EFI partition if preserving existing
-        root_start = efi_end  # Still calculate from expected EFI end
+    # Layout decisions
+    if bios_mode:
+        # BIOS on GPT requires a bios_grub partition for core.img embedding
+        root_start = "3MiB"
         root_end = "100%"
+        commands.append(["parted", "-s", disk_path, "mklabel", "gpt"])
+        commands.append(["parted", "-s", disk_path, "mkpart", "\"BIOS boot\"", "", first_start, bios_end])
+        commands.append(["parted", "-s", disk_path, "set", "1", "bios_grub", "on"])
         commands.append(["parted", "-s", disk_path, "mkpart", "\"Linux filesystem\"", filesystem, root_start, root_end])
     else:
-        # Normal installation - create full layout
-        root_start = efi_end
-        root_end = "100%"
-        
-        # Make GPT table
-        commands.append(["parted", "-s", disk_path, "mklabel", "gpt"])
-        # Make EFI partition
-        commands.append(["parted", "-s", disk_path, "mkpart", "\"EFI System Partition\"", "fat32", efi_start, efi_end])
-        # Set flags on EFI partition (part# 1)
-        commands.append(["parted", "-s", disk_path, "set", "1", "boot", "on"])
-        commands.append(["parted", "-s", disk_path, "set", "1", "esp", "on"])
-        # Make root partition
-        commands.append(["parted", "-s", disk_path, "mkpart", "\"Linux filesystem\"", filesystem, root_start, root_end])
+        if dual_boot and preserve_efi:
+            # Don't create new GPT table or EFI partition if preserving existing
+            root_start = efi_end  # Still calculate from expected EFI end
+            root_end = "100%"
+            commands.append(["parted", "-s", disk_path, "mkpart", "\"Linux filesystem\"", filesystem, root_start, root_end])
+        else:
+            # Normal UEFI installation - create full layout
+            root_start = efi_end
+            root_end = "100%"
+            commands.append(["parted", "-s", disk_path, "mklabel", "gpt"])
+            commands.append(["parted", "-s", disk_path, "mkpart", "\"EFI System Partition\"", "fat32", first_start, efi_end])
+            commands.append(["parted", "-s", disk_path, "set", "1", "boot", "on"])
+            commands.append(["parted", "-s", disk_path, "set", "1", "esp", "on"])
+            commands.append(["parted", "-s", disk_path, "mkpart", "\"Linux filesystem\"", filesystem, root_start, root_end])
     
     return commands
 
-def generate_mkfs_commands(disk_path, filesystem="btrfs", partition_prefix="", dual_boot=False, preserve_efi=False):
-    """Generates mkfs commands for partitions with customizable filesystem type."""
+def generate_mkfs_commands(disk_path, filesystem="btrfs", partition_prefix="", dual_boot=False, preserve_efi=False, include_efi=True):
+    """Generates mkfs commands for partitions.
+    - include_efi=True: partition 1 is EFI (vfat), partition 2 is root
+    - include_efi=False: partition 1 is root
+    """
     commands = []
     # Determine partition device names consistently
-    part1 = f"{disk_path}{partition_prefix}1"
-    part2 = f"{disk_path}{partition_prefix}2"
+    if include_efi:
+        efi_part = f"{disk_path}{partition_prefix}1"
+        root_part = f"{disk_path}{partition_prefix}2"
+        if not (dual_boot and preserve_efi):
+            commands.append(["mkfs.vfat", "-F32", efi_part])
+    else:
+        root_part = f"{disk_path}{partition_prefix}1"
 
-    if not (dual_boot and preserve_efi):
-        # Format EFI partition only if not preserving existing
-        commands.append(["mkfs.vfat", "-F32", part1])
-    
     # Format root partition with selected filesystem
     if filesystem == "ext4":
-        commands.append(["mkfs.ext4", "-F", part2])
+        commands.append(["mkfs.ext4", "-F", root_part])
     elif filesystem == "btrfs":
-        commands.append(["mkfs.btrfs", "-f", part2])
+        commands.append(["mkfs.btrfs", "-f", root_part])
     elif filesystem == "xfs":
-        commands.append(["mkfs.xfs", "-f", part2])
+        commands.append(["mkfs.xfs", "-f", root_part])
     else:
         # Fallback to ext4
         commands.append(["mkfs.ext4", "-F", part2])
@@ -790,6 +805,9 @@ class DiskPage(BaseConfigurationPage):
         if self.partitioning_method in ["normal", "dual_boot"]:
             print(f"  Generating partitioning commands for: {primary_disk}")
             
+            # Detect firmware type to decide partition layout
+            is_uefi = os.path.exists("/sys/firmware/efi")
+
             # Get EFI size if custom formatting is enabled
             efi_size = int(self.efi_size_row.get_value()) if self.custom_format_enabled else 512
             
@@ -811,21 +829,24 @@ class DiskPage(BaseConfigurationPage):
                 print(f"Wipe command: {wipe_cmd}")
             
             parted_cmds = generate_gpt_commands(
-                primary_disk, 
+                primary_disk,
                 efi_size_mb=efi_size,
                 filesystem=self.filesystem_type,
                 dual_boot=self.dual_boot_enabled,
-                preserve_efi=self.preserve_efi
+                preserve_efi=self.preserve_efi if is_uefi else False,
+                bios_mode=not is_uefi
             )
             config_values["commands"].extend(parted_cmds)
             print(f"Parted commands: {parted_cmds}")
             
+            include_efi = is_uefi and not (self.dual_boot_enabled and self.preserve_efi)
             mkfs_cmds = generate_mkfs_commands(
                 primary_disk,
                 filesystem=self.filesystem_type,
                 partition_prefix=partition_prefix,
                 dual_boot=self.dual_boot_enabled,
-                preserve_efi=self.preserve_efi
+                preserve_efi=self.preserve_efi if is_uefi else False,
+                include_efi=include_efi
             )
             config_values["commands"].extend(mkfs_cmds)
             print(f"Mkfs commands: {mkfs_cmds}")
@@ -839,23 +860,26 @@ class DiskPage(BaseConfigurationPage):
             print(f"Part2 suffix: '{part2_suffix}'")
             
             partitions = []
-            if not (self.dual_boot_enabled and self.preserve_efi):
-                efi_device = f"{primary_disk}{part1_suffix}"
-                partitions.append({
-                    "device": efi_device, 
-                    "mountpoint": "/boot/efi", 
-                    "fstype": "vfat"
-                })
-                print(f"EFI partition: device={efi_device}, mountpoint=/boot/efi, fstype=vfat")
-            elif self.selected_efi_partition:
-                partitions.append({
-                    "device": self.selected_efi_partition,
-                    "mountpoint": "/boot/efi",
-                    "fstype": "vfat"
-                })
-                print(f"Using existing EFI partition: device={self.selected_efi_partition}")
-            
-            root_device = f"{primary_disk}{part2_suffix}"
+            if is_uefi:
+                if not (self.dual_boot_enabled and self.preserve_efi):
+                    efi_device = f"{primary_disk}{part1_suffix}"
+                    partitions.append({
+                        "device": efi_device,
+                        "mountpoint": "/boot/efi",
+                        "fstype": "vfat"
+                    })
+                    print(f"EFI partition: device={efi_device}, mountpoint=/boot/efi, fstype=vfat")
+                elif self.selected_efi_partition:
+                    partitions.append({
+                        "device": self.selected_efi_partition,
+                        "mountpoint": "/boot/efi",
+                        "fstype": "vfat"
+                    })
+                    print(f"Using existing EFI partition: device={self.selected_efi_partition}")
+                root_device = f"{primary_disk}{part2_suffix}"
+            else:
+                # BIOS: root is the first real partition
+                root_device = f"{primary_disk}{part1_suffix}"
             partitions.append({
                 "device": root_device, 
                 "mountpoint": "/", 
