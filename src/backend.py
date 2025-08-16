@@ -2240,22 +2240,22 @@ def copy_live_environment(target_root, progress_callback=None):
     if progress_callback:
         progress_callback("Preparing to copy live environment...", 0.0)
     
-    # Define directories to copy (exclude system-specific directories)
+    # Define directories to copy (exclude system-specific and volatile/mount directories)
+    # Note: Excluding /mnt and /media prevents copying mounted volumes and avoids
+    # recursively copying the target root (e.g., /mnt/sysimage) into itself.
     copy_directories = [
         "/bin",
-        "/boot", 
+        "/boot",
         "/etc",
         "/home",
         "/lib",
         "/lib64",
-        "/media",
-        "/mnt",
         "/opt",
         "/root",
         "/sbin",
         "/srv",
         "/usr",
-        "/var"
+        "/var",
     ]
     
     # Directories to exclude from copying (system-specific)
