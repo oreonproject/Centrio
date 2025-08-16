@@ -2239,6 +2239,25 @@ def copy_live_environment(target_root, progress_callback=None):
     
     if progress_callback:
         progress_callback("Preparing to copy live environment...", 0.0)
+
+    # Validate target_root is mounted and writable before proceeding
+    try:
+        if not os.path.exists(target_root):
+            os.makedirs(target_root, exist_ok=True)
+        # Best-effort: ensure it's a mount point
+        if not os.path.ismount(target_root):
+            print(f"WARNING: {target_root} is not a mount point. Proceeding may copy into live FS.")
+        # Write test
+        test_path = os.path.join(target_root, ".copy_write_test")
+        with open(test_path, "w") as f:
+            f.write("ok")
+        os.remove(test_path)
+    except Exception as e:
+        err = f"Target root not writable at {target_root}: {e}"
+        print(f"ERROR: {err}")
+        if progress_callback:
+            progress_callback(err, 0.0)
+        return False, err
     
     # Define directories to copy (exclude system-specific and volatile/mount directories)
     # Note: Excluding /mnt and /media prevents copying mounted volumes and avoids
@@ -2295,6 +2314,35 @@ def copy_live_environment(target_root, progress_callback=None):
         source = directory
         destination = os.path.join(target_root, directory.lstrip('/'))
         
+        # If the source is a symlink (e.g., /bin -> /usr/bin), replicate the symlink
+        try:
+            if os.path.islink(source):
+                link_target = os.readlink(source)
+                # Ensure parent directory exists
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                # If destination exists (as file/dir/link), remove it to replace with symlink
+                if os.path.lexists(destination):
+                    try:
+                        if os.path.isdir(destination) and not os.path.islink(destination):
+                            shutil.rmtree(destination)
+                        else:
+                            os.remove(destination)
+                    except Exception:
+                        pass
+                os.symlink(link_target, destination)
+                completed_dirs += 1
+                progress_fraction = 0.1 + (completed_dirs / total_dirs) * 0.8
+                if progress_callback:
+                    progress_callback(f"Linked {directory} -> {link_target} ({completed_dirs}/{total_dirs})", progress_fraction)
+                print(f"Created symlink {destination} -> {link_target}")
+                continue
+        except OSError as e:
+            error_msg = f"Failed to create symlink for {directory}: {e}"
+            print(f"ERROR: {error_msg}")
+            if progress_callback:
+                progress_callback(error_msg, 0.1)
+            return False, error_msg
+        
         # Create destination directory if it doesn't exist
         os.makedirs(destination, exist_ok=True)
         
@@ -2303,7 +2351,15 @@ def copy_live_environment(target_root, progress_callback=None):
         try:
             # Use find to copy all files and directories from source to destination
             # This avoids the "copy into itself" issue
-            find_cmd = ["find", source, "-mindepth", "1", "-maxdepth", "1", "-exec", "cp", "-a", "--preserve=all", "{}", destination, ";"]
+            # Use find to copy all files and directories from source to destination, but avoid crossing filesystem boundaries
+            # and skip mount points; this reduces risk of ENOMEM due to device or tmpfs peculiarities.
+            find_cmd = [
+                "find", source,
+                "-mindepth", "1",
+                "-maxdepth", "1",
+                "-xdev",
+                "-exec", "cp", "-a", "--preserve=all", "{}", destination, ";"
+            ]
             
             # Run find command
             result = subprocess.run(find_cmd, capture_output=True, text=True, check=True, timeout=1800)  # 30 min timeout per dir
